@@ -11,8 +11,6 @@ import (
 	"time"
 	"unicode/utf8"
 
-	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
-
 	"control/internal/guard"
 	"control/internal/i18n"
 	"control/internal/runners"
@@ -31,19 +29,14 @@ func (b *Bot) NotifyAll(text string) {
 	}
 }
 
-// handleRunnerCommand serves /bots /bot /pause /resume /run /plan /positions /report /events /debug /ping.
-func (b *Bot) handleRunnerCommand(ctx context.Context, m *tgbotapi.Message, lang string) {
-	chatID := m.Chat.ID
+// runnerAction serves the trading-bot commands and their keyboard buttons:
+// bots, bot, pause, resume, run, plan, positions, report, events, debug, ping.
+func (b *Bot) runnerAction(ctx context.Context, chatID int64, lang string, by int64, action, arg string) {
 	if b.rr.Empty() {
 		b.send(chatID, lang, i18n.T(lang, "runners_none"))
 		return
 	}
-	arg := strings.TrimSpace(m.CommandArguments())
-	var by int64
-	if m.From != nil {
-		by = m.From.ID
-	}
-	switch m.Command() {
+	switch action {
 	case "bots":
 		b.cmdBots(ctx, chatID, lang)
 	case "bot":
@@ -75,98 +68,6 @@ func (b *Bot) handleRunnerCommand(ctx context.Context, m *tgbotapi.Message, lang
 	}
 }
 
-// handleRunnerCallback serves the rb:<action>:<strategy id> inline buttons.
-func (b *Bot) handleRunnerCallback(ctx context.Context, q *tgbotapi.CallbackQuery) {
-	chatID := q.Message.Chat.ID
-	lang := b.langFor(chatID, q.From)
-	if b.rr.Empty() {
-		b.send(chatID, lang, i18n.T(lang, "runners_none"))
-		return
-	}
-	parts := strings.SplitN(q.Data, ":", 3)
-	if len(parts) != 3 {
-		return
-	}
-	action, id := parts[1], parts[2]
-	switch action {
-	case "pause":
-		b.cmdSetDesired(ctx, chatID, lang, q.From.ID, id, true)
-	case "resume":
-		b.cmdSetDesired(ctx, chatID, lang, q.From.ID, id, false)
-	case "run":
-		b.cmdRun(ctx, chatID, lang, id)
-	case "plan":
-		b.cmdPlan(ctx, chatID, lang, id)
-	case "report":
-		b.cmdReport(ctx, chatID, lang, id)
-	case "pos":
-		b.cmdPositions(ctx, chatID, lang, id)
-	}
-}
-
-// ---- keyboards ----
-
-const maxCallbackData = 64
-
-func btn(text, action, id string) (tgbotapi.InlineKeyboardButton, bool) {
-	data := "rb:" + action + ":" + id
-	if len(data) > maxCallbackData {
-		return tgbotapi.InlineKeyboardButton{}, false
-	}
-	return tgbotapi.NewInlineKeyboardButtonData(text, data), true
-}
-
-type rbtn struct{ text, action string }
-
-// row builds one keyboard row for strategy id, skipping buttons whose callback data would be too long.
-func row(id string, buttons ...rbtn) []tgbotapi.InlineKeyboardButton {
-	var out []tgbotapi.InlineKeyboardButton
-	for _, bt := range buttons {
-		if kb, ok := btn(bt.text, bt.action, id); ok {
-			out = append(out, kb)
-		}
-	}
-	return out
-}
-
-func toggleIcon(s runners.Strategy) string {
-	if s.Desired == "paused" {
-		return "▶️"
-	}
-	return "⏸"
-}
-
-func toggleAction(s runners.Strategy) string {
-	if s.Desired == "paused" {
-		return "resume"
-	}
-	return "pause"
-}
-
-func toggleLabel(lang string, s runners.Strategy) string {
-	if s.Desired == "paused" {
-		return i18n.T(lang, "rb_resume")
-	}
-	return i18n.T(lang, "rb_pause")
-}
-
-func (b *Bot) sendInline(chatID int64, text string, rows [][]tgbotapi.InlineKeyboardButton) {
-	msg := tgbotapi.NewMessage(chatID, text)
-	msg.ParseMode = tgbotapi.ModeHTML
-	var kept [][]tgbotapi.InlineKeyboardButton
-	for _, r := range rows {
-		if len(r) > 0 {
-			kept = append(kept, r)
-		}
-	}
-	if len(kept) > 0 {
-		msg.ReplyMarkup = tgbotapi.NewInlineKeyboardMarkup(kept...)
-	}
-	if _, err := b.api.Send(msg); err != nil {
-		log.Printf("chat %d: send: %v", chatID, err)
-	}
-}
-
 // ---- commands ----
 
 type stratRow struct {
@@ -186,7 +87,6 @@ func (b *Bot) allStrategies() []stratRow {
 
 func (b *Bot) cmdBots(ctx context.Context, chatID int64, lang string) {
 	lines := []string{i18n.T(lang, "bots_title"), ""}
-	var rows [][]tgbotapi.InlineKeyboardButton
 	n := 0
 	now := time.Now()
 	for _, snap := range b.rr.Snapshot() {
@@ -200,14 +100,13 @@ func (b *Bot) cmdBots(ctx context.Context, chatID int64, lang string) {
 			icon, label := stateIcon(lang, snap, s)
 			lines = append(lines, i18n.T(lang, "bots_line", n, icon, guard.Escape(s.ID), modeLabel(lang, s.Mode), label,
 				s.OpenPositions, guard.Money(s.Equity), guard.Signed(s.PnlTotal), ago(lang, now, snap.LastOK)))
-			num := strconv.Itoa(n)
-			rows = append(rows, row(s.ID,
-				rbtn{num + " " + toggleIcon(s), toggleAction(s)},
-				rbtn{num + " 📋", "plan"},
-				rbtn{num + " 📊", "report"}))
 		}
 	}
-	b.sendInline(chatID, joinLines(lines), rows)
+	if n > 0 {
+		lines = append(lines, "", i18n.T(lang, "bots_pick"))
+	}
+	b.setView(chatID, viewBots)
+	b.send(chatID, lang, joinLines(lines))
 }
 
 func (b *Bot) cmdBot(ctx context.Context, chatID int64, lang, query string) {
@@ -240,11 +139,8 @@ func (b *Bot) cmdBot(ctx context.Context, chatID int64, lang, query string) {
 			guard.Human(time.Duration(h.UptimeS)*time.Second, lang), okMark(h.Binance.OK),
 			strconv.FormatFloat(h.Binance.LatencyMS, 'f', 0, 64), yn(lang, h.Busy))
 	}
-	b.sendInline(chatID, text, [][]tgbotapi.InlineKeyboardButton{
-		row(id, rbtn{toggleLabel(lang, s), toggleAction(s)}, rbtn{i18n.T(lang, "rb_run"), "run"}),
-		row(id, rbtn{i18n.T(lang, "rb_plan"), "plan"}, rbtn{i18n.T(lang, "rb_pos"), "pos"},
-			rbtn{i18n.T(lang, "rb_report"), "report"}),
-	})
+	b.setView(chatID, viewStrat+id)
+	b.send(chatID, lang, text)
 }
 
 func (b *Bot) cmdSetDesired(ctx context.Context, chatID int64, lang string, by int64, query string, pause bool) {

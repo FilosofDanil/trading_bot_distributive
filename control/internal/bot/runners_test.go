@@ -35,12 +35,3 @@ func TestFitPreKeepsTagsBalanced(t *testing.T) {
 		t.Error("row text must be escaped")
 	}
 }
-
-func TestCallbackDataLimit(t *testing.T) {
-	if _, ok := btn("x", "report", strings.Repeat("a", 60)); ok {
-		t.Error("data over 64 bytes must be skipped")
-	}
-	if _, ok := btn("x", "pause", "funding.carry"); !ok {
-		t.Error("short data must be kept")
-	}
-}

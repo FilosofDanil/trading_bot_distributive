@@ -1,4 +1,5 @@
-// Package bot is the Telegram front end: key setup wizard, /status, language choice.
+// Package bot is the Telegram front end: key setup wizard, /status, language choice, trading bots.
+// Every button is a reply (text) keyboard; see keyboards.go.
 package bot
 
 import (
@@ -7,6 +8,7 @@ import (
 	"log"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
@@ -30,6 +32,9 @@ type Bot struct {
 	presetKey   string // keys from the server config; when set /start skips the key dialog
 	presetSec   string
 	rr          *runners.Registry // trading-bot runners; nil = none configured
+
+	viewMu sync.Mutex
+	views  map[int64]string // chat id -> keyboard view (keyboards.go); absent = main menu
 }
 
 type Options struct {
@@ -80,20 +85,10 @@ func (b *Bot) Notify(chatID int64, text string) {
 func (b *Bot) send(chatID int64, lang, text string) {
 	msg := tgbotapi.NewMessage(chatID, text)
 	msg.ParseMode = tgbotapi.ModeHTML
-	msg.ReplyMarkup = keyboard(lang)
+	msg.ReplyMarkup = b.keyboardFor(chatID, lang)
 	if _, err := b.api.Send(msg); err != nil {
 		log.Printf("chat %d: send: %v", chatID, err)
 	}
-}
-
-func keyboard(lang string) tgbotapi.ReplyKeyboardMarkup {
-	kb := tgbotapi.NewReplyKeyboard(tgbotapi.NewKeyboardButtonRow(
-		tgbotapi.NewKeyboardButton(i18n.T(lang, "btn_status")),
-		tgbotapi.NewKeyboardButton(i18n.T(lang, "btn_help")),
-		tgbotapi.NewKeyboardButton(i18n.T(lang, "btn_lang")),
-	))
-	kb.ResizeKeyboard = true
-	return kb
 }
 
 // RegisterCommands publishes the command menu in both languages.
@@ -148,6 +143,9 @@ func (b *Bot) RegisterCommands() {
 func (b *Bot) Run(ctx context.Context) {
 	uc := tgbotapi.NewUpdate(0)
 	uc.Timeout = 50
+	// Telegram keeps the last allowed_updates of a token; name them explicitly so a stale setting
+	// from another client cannot silently drop updates.
+	uc.AllowedUpdates = []string{"message", "callback_query"}
 	updates := b.api.GetUpdatesChan(uc)
 	for {
 		select {
@@ -168,7 +166,7 @@ func (b *Bot) handle(ctx context.Context, up tgbotapi.Update) {
 	}()
 	switch {
 	case up.CallbackQuery != nil:
-		b.handleCallback(ctx, up.CallbackQuery)
+		b.handleCallback(up.CallbackQuery)
 	case up.Message != nil && up.Message.Chat.IsPrivate():
 		b.handleMessage(ctx, up.Message)
 	}
@@ -199,7 +197,16 @@ func (b *Bot) handleMessage(ctx context.Context, m *tgbotapi.Message) {
 		_, _ = b.st.Update(chatID, func(u *store.User) { u.Lang = lang })
 	}
 
+	text := strings.TrimSpace(m.Text)
+	if !m.IsCommand() && b.handleButton(ctx, m, lang, text) {
+		return
+	}
+
 	if m.IsCommand() {
+		switch m.Command() {
+		case "start", "status", "stop", "cancel", "help":
+			b.setView(chatID, viewMain)
+		}
 		switch m.Command() {
 		case "start":
 			b.cmdStart(ctx, chatID, lang)
@@ -214,14 +221,17 @@ func (b *Bot) handleMessage(ctx context.Context, m *tgbotapi.Message) {
 		case "help":
 			b.send(chatID, lang, i18n.T(lang, "help"))
 		case "bots", "bot", "pause", "resume", "run", "plan", "positions", "report", "events", "debug", "ping":
-			b.handleRunnerCommand(ctx, m, lang)
+			var by int64
+			if m.From != nil {
+				by = m.From.ID
+			}
+			b.runnerAction(ctx, chatID, lang, by, m.Command(), strings.TrimSpace(m.CommandArguments()))
 		default:
 			b.send(chatID, lang, i18n.T(lang, "unknown"))
 		}
 		return
 	}
 
-	text := strings.TrimSpace(m.Text)
 	u, _ := b.st.Get(chatID)
 	switch u.Step {
 	case store.StepAwaitKey:
@@ -233,12 +243,8 @@ func (b *Bot) handleMessage(ctx context.Context, m *tgbotapi.Message) {
 	}
 
 	switch {
-	case isButton(text, "btn_status"), strings.EqualFold(text, "status"), strings.EqualFold(text, "статус"):
+	case strings.EqualFold(text, "status"), strings.EqualFold(text, "статус"):
 		b.cmdStatus(chatID, lang)
-	case isButton(text, "btn_help"):
-		b.send(chatID, lang, i18n.T(lang, "help"))
-	case isButton(text, "btn_lang"):
-		b.cmdLanguage(chatID, lang)
 	default:
 		b.send(chatID, lang, i18n.T(lang, "unknown"))
 	}
@@ -401,32 +407,15 @@ func StatusText(st *store.Store, g *guard.Guard, chatID int64, lang string, now 
 		l.OpenPositions, r.AlertPct, r.BlockPct, guard.Human(resetIn, lang), state)
 }
 
-func (b *Bot) cmdLanguage(chatID int64, lang string) {
-	msg := tgbotapi.NewMessage(chatID, i18n.T(lang, "choose_lang"))
-	msg.ReplyMarkup = tgbotapi.NewInlineKeyboardMarkup(tgbotapi.NewInlineKeyboardRow(
-		tgbotapi.NewInlineKeyboardButtonData("🇬🇧 English", "lang:"+i18n.EN),
-		tgbotapi.NewInlineKeyboardButtonData("🇷🇺 Русский", "lang:"+i18n.RU),
-	))
-	if _, err := b.api.Send(msg); err != nil {
-		log.Printf("chat %d: send: %v", chatID, err)
-	}
-}
-
-func (b *Bot) handleCallback(ctx context.Context, q *tgbotapi.CallbackQuery) {
+// handleCallback answers presses on inline buttons left in old messages: the bot no longer sends
+// inline keyboards, so it just stops the spinner and re-sends the menu with the text keyboard.
+func (b *Bot) handleCallback(q *tgbotapi.CallbackQuery) {
 	_, _ = b.api.Request(tgbotapi.NewCallback(q.ID, ""))
 	if q.Message == nil || !b.isAllowed(q.From) {
 		return
 	}
-	if strings.HasPrefix(q.Data, "rb:") {
-		b.handleRunnerCallback(ctx, q)
-		return
-	}
-	if !strings.HasPrefix(q.Data, "lang:") {
-		return
-	}
-	lang := i18n.Normalize(strings.TrimPrefix(q.Data, "lang:"), b.defaultLang)
 	chatID := q.Message.Chat.ID
-	_, _ = b.st.Update(chatID, func(u *store.User) { u.Lang = lang })
-	_, _ = b.api.Request(tgbotapi.NewDeleteMessage(chatID, q.Message.MessageID))
-	b.send(chatID, lang, i18n.T(lang, "lang_set"))
+	lang := b.langFor(chatID, q.From)
+	b.setView(chatID, viewMain)
+	b.send(chatID, lang, i18n.T(lang, "menu_shown"))
 }

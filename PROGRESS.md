@@ -39,3 +39,13 @@ PAPER mode only: the lab rule is live orders only after explicit approval + IP-l
       control RUNNERS + CONTROL_TOKEN → redeploy a79ea9fd SUCCESS, "runners: 1 configured, poll every 30s";
       network log: control → funding-carry:8080 TCP OK every 30 s
 - [ ] Owner: in Telegram /bots, /plan funding, /debug (first universe build ~12 min after each fresh volume)
+
+# Bugfix 2026-10-10 — inline buttons did not work → reply (text) keyboards
+
+- [x] control/internal/bot/keyboards.go: main menu (Status, Bots, Help, Language), /bots list ("🤖 <id>"),
+      per-bot controls ("<label> · <id>": pause, resume, run, plan, positions, report), language choice;
+      per-chat keyboard view; presses parsed from message text; old inline presses re-send the menu
+- [x] removed InlineKeyboard / callback routing (runners.go, bot.go); getUpdates names allowed_updates explicitly
+- [x] tests: keyboards_test.go (round-trip of every button, views); go vet + go test pass
+- [ ] Railway redeploy of control
+- [ ] Owner: in Telegram tap 🤖 Bots → a bot → buttons

@@ -207,6 +207,22 @@ var messages = map[string]map[string]string{
 		EN: "🌐 Language",
 		RU: "🌐 Язык",
 	},
+	"btn_bots": {
+		EN: "🤖 Bots",
+		RU: "🤖 Боты",
+	},
+	"btn_menu": {
+		EN: "⬅️ Menu",
+		RU: "⬅️ Меню",
+	},
+	"menu_shown": {
+		EN: "Main menu — use the buttons below.",
+		RU: "Главное меню — кнопки внизу.",
+	},
+	"bots_pick": {
+		EN: "Tap a bot below to open its controls.",
+		RU: "Нажмите на бота внизу, чтобы открыть управление.",
+	},
 
 	// ---- trading-bot runners ----
 	"runners_none": {
