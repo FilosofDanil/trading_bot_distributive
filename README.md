@@ -73,6 +73,26 @@ in three cases: a runner stops answering 3 times in a row (and again when it rec
 | `CONTROL_TOKEN` | shared secret with the runners, required when `RUNNERS` is set (sealed) |
 | `RUNNER_POLL_INTERVAL` | default `30s` |
 
+Hosting `funding-carry` with the Railway CLI (done 2026-10-10; `railway status` is linked to the project):
+
+```
+railway add --service funding-carry                                   # empty service
+railway api 'mutation { serviceInstanceUpdate(serviceId:"<id>", environmentId:"<env>", input:{
+  rootDirectory:"/funding_carry", dockerfilePath:"Dockerfile", watchPatterns:["/funding_carry/**"],
+  numReplicas:1, overlapSeconds:0, drainingSeconds:30, restartPolicyType:ON_FAILURE,
+  restartPolicyMaxRetries:10, healthcheckPath:"/healthz", healthcheckTimeout:120, sleepApplication:false}) }'
+railway service scale --service funding-carry europe-west4-drams3a=1  # EU West, like control
+railway api 'mutation { volumeCreate(input:{projectId:"<p>", serviceId:"<id>", environmentId:"<env>",
+  mountPath:"/data", region:"europe-west4-drams3a"}) { id } }'        # `railway volume add` panics in CLI 5.64
+<token> | railway variable set CONTROL_TOKEN --stdin --service funding-carry --skip-deploys   # same value on control
+railway variable set RUNNERS=funding=http://funding-carry.railway.internal:8080 --service control --skip-deploys
+railway service source connect --repo FilosofDanil/trading_bot_distributive --branch main --service funding-carry
+railway service redeploy --service control --yes
+```
+
+Check: `railway logs --service control --network` shows TCP to `<funding-carry ip>:8080 OK` every 30 s.
+In Git Bash, set `MSYS_NO_PATHCONV=1` before any argument that starts with `/`.
+
 ## What the system does
 
 1. **Monitors the account**: balance, equity, daily PnL, drawdown from peak. Sends alerts to Telegram.

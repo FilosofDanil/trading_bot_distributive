@@ -33,6 +33,9 @@ PAPER mode only: the lab rule is live orders only after explicit approval + IP-l
       /positions /report /events /debug /ping, inline buttons, i18n EN/RU, config RUNNERS / CONTROL_TOKEN
 - [x] gofmt / go vet / go test; docker build both; e2e Go client ↔ real Python runner (internal/runners/e2e_test.go)
 - [x] CI: python job for funding_carry
-- [ ] commit + push to main (funding_carry/ in its own folder)
-- [ ] Railway CLI: service funding-carry (root /funding_carry, volume /data, CONTROL_TOKEN), control RUNNERS +
-      CONTROL_TOKEN, deploy both, logs + /v1/health from control
+- [x] commit ec03d1f + push to main (funding_carry/ in its own folder)
+- [x] Railway CLI: service funding-carry (root /funding_carry, EU West, volume /data, CONTROL_TOKEN, healthcheck
+      /healthz) ← GitHub main → deployment 36695a9d SUCCESS, log "API on [::]:8080", Binance reachable (no 451);
+      control RUNNERS + CONTROL_TOKEN → redeploy a79ea9fd SUCCESS, "runners: 1 configured, poll every 30s";
+      network log: control → funding-carry:8080 TCP OK every 30 s
+- [ ] Owner: in Telegram /bots, /plan funding, /debug (first universe build ~12 min after each fresh volume)
