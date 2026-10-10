@@ -9,4 +9,7 @@
 - [x] go vet / go test / docker build pass; `-check` authorizes with Telegram
 - [x] README: round-1 deploy steps; migration plan ticks
 - [x] Commit + push; verify no env file in git
-- [ ] Railway: create project from repo, Root Directory /control, volume /data, sealed variables (needs the account owner)
+- [x] Railway: project `trading_bot_distributive` (EU West), service `control` ← GitHub main, Root Directory /control,
+      volume /data, variables TELEGRAM_BOT_TOKEN / ALLOWED_USERNAMES / ENCRYPTION_KEY → deploy SUCCESS,
+      log `telegram: authorized as @testing_claude_bot`
+- [ ] Owner: seal the variables in the dashboard, add ALLOWED_USER_IDS, enable Wait for CI, live /start test

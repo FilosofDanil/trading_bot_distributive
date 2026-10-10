@@ -32,8 +32,10 @@ Run locally: `cd control && go run .` (reads `control/.env` if present; `-check`
 Host on Railway (one time, in the dashboard):
 
 1. New Project → Deploy from GitHub repo → this repo, region **EU West (Amsterdam)**.
-2. Service settings: Root Directory `/control`, Config-as-code path `/control/railway.json`
-   (Dockerfile build, 1 replica, no deploy overlap, restart on failure, watch `/control/**`).
+2. Service settings: Root Directory `/control`, Dockerfile path `Dockerfile`, watch `/control/**`,
+   1 replica, overlap 0 s, draining 30 s, restart on failure. Railway no longer accepts linking
+   `railway.json` (config-as-code is deprecated), so these are set on the service directly;
+   `control/railway.json` documents the intended values.
 3. Add a **Volume** mounted at `/data` (the deploy refuses to start without it: `requiredMountPath`).
 4. Variables: the table above, secrets sealed. Enable **Wait for CI**.
 5. Deploy and check the log for `telegram: authorized as @<bot>`. Stop any local copy that uses the same
