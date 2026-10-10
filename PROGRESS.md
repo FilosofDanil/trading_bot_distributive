@@ -12,4 +12,5 @@
 - [x] Railway: project `trading_bot_distributive` (EU West), service `control` ← GitHub main, Root Directory /control,
       volume /data, variables TELEGRAM_BOT_TOKEN / ALLOWED_USERNAMES / ENCRYPTION_KEY → deploy SUCCESS,
       log `telegram: authorized as @testing_claude_bot`
-- [ ] Owner: seal the variables in the dashboard, add ALLOWED_USER_IDS, enable Wait for CI, live /start test
+- [x] ALLOWED_USER_IDS=891477091 set → deployment 6c48af81 SUCCESS
+- [ ] Owner: seal the variables in the dashboard, enable Wait for CI, live /start test
