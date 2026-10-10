@@ -1,0 +1,34 @@
+# Secrets and env files — never in git. This includes .env.example: it stays local only,
+# the list of variables is documented in README.md.
+.env
+.env.*
+*.env
+env.example
+*.key
+*.pem
+config.txt
+secrets/
+
+# Runtime state and data
+data/
+state.json
+*.db
+*.db-journal
+*.sqlite
+*.log
+*.dump
+*.jsonl
+*.csv
+
+# Build output
+*.exe
+control/control
+dist/
+build/
+
+# Tooling
+graphify-out/
+__pycache__/
+.venv/
+.idea/
+.vscode/

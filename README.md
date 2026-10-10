@@ -6,6 +6,39 @@ This is a clean version of the architecture. Working code is being moved here pi
 (`lossguard/`, `Trading_Bot/`, `journal/`). A detailed diagram is in
 `Engine/docs/trading_infrastructure.html` (it should be moved to `docs/architecture.html`).
 
+## Current state: round 1 — `control` on Railway
+
+`control/` is the LossGuard Telegram bot ported from `Engine/lossguard`: it checks the account every 10 s,
+alerts at a 10 % daily loss, and at 20 % cancels all orders, closes all positions and blocks trading for 24 h.
+Commands so far: `/start`, `/status`, `/language`, `/stop`, `/cancel`, `/help`. State is still a JSON file
+(`/data/state.json` on a Railway volume); Postgres comes in a later round.
+
+**Secrets come only from the environment** (Railway service variables). No env file of any kind is in git:
+`.gitignore` excludes `.env`, `.env.*` (including `.env.example`), `*.key`, `data/`, and CI fails if one is ever tracked.
+A local `control/.env.example` exists only on the developer machine.
+
+| Variable | Required | Notes |
+|---|---|---|
+| `TELEGRAM_BOT_TOKEN` | yes, sealed | from @BotFather |
+| `ALLOWED_USER_IDS` | yes | comma-separated numeric Telegram ids (@userinfobot); mandatory when Binance keys are preset |
+| `BINANCE_API_KEY`, `BINANCE_API_SECRET` | optional, sealed | separate key for Railway: Futures read + trade, no withdraw/transfer. Empty = `/start` asks in the chat |
+| `ENCRYPTION_KEY` | recommended, sealed | 64 hex chars (`openssl rand -hex 32`); encrypts stored keys. Empty = generated into the volume |
+| `TIMEZONE`, `DEFAULT_LANG` | optional | e.g. `Europe/Kyiv`, `en`/`ru`; defaults `UTC`, `en` |
+| `ALERT_LOSS_PCT`, `BLOCK_LOSS_PCT`, `BLOCK_DURATION`, `PERIOD`, `ALERT_RESET_AFTER`, `CHECK_INTERVAL` | optional | defaults `10`, `20`, `24h`, `24h`, `1h`, `10s` |
+| `STATE_FILE` | optional | image default `/data/state.json` |
+
+Run locally: `cd control && go run .` (reads `control/.env` if present; `-check` validates config + token and exits).
+
+Host on Railway (one time, in the dashboard):
+
+1. New Project → Deploy from GitHub repo → this repo, region **EU West (Amsterdam)**.
+2. Service settings: Root Directory `/control`, Config-as-code path `/control/railway.json`
+   (Dockerfile build, 1 replica, no deploy overlap, restart on failure, watch `/control/**`).
+3. Add a **Volume** mounted at `/data` (the deploy refuses to start without it: `requiredMountPath`).
+4. Variables: the table above, secrets sealed. Enable **Wait for CI**.
+5. Deploy and check the log for `telegram: authorized as @<bot>`. Stop any local copy that uses the same
+   bot token first: two pollers on one token fight over `getUpdates` (HTTP 409).
+
 ## What the system does
 
 1. **Monitors the account**: balance, equity, daily PnL, drawdown from peak. Sends alerts to Telegram.
@@ -143,8 +176,8 @@ is added before the first commit. If a key has ever landed in the repository, it
 
 ## Migration plan
 
-- [ ] 0 · `.gitignore`, CI, private GitHub repo, Railway project in EU West, Postgres, separate Binance key
-- [ ] 1 · `control` ← `lossguard`: state → Postgres + migrations, `ALLOWED_USER_IDS`, keys from env, `/healthz`, watchdog, equity snapshots, `cash_flows`
+- [ ] 0 · `.gitignore` ✅, CI ✅, private GitHub repo, Railway project in EU West, Postgres, separate Binance key
+- [ ] 1 · `control` ← `lossguard` ✅ (round 1: `ALLOWED_USER_IDS` ✅, keys from env ✅, Dockerfile + `railway.json` ✅); still to do: state → Postgres + migrations, `/healthz`, watchdog, equity snapshots, `cash_flows`
 - [ ] 2 · `runner` ← `swingbot`: journal → Postgres, `desired_state` instead of the STOP file, `risk_lock` check, control API, leader-lock, `clientOrderId` tags; one week in paper mode
 - [ ] 3 · runner polling, `/bots`, pause / resume / flatten, fills import (`journal`), `/report`, `/compare`, 23:59 digest
 - [ ] 4 · `backup` service, `/backup`, `/backups`, first test restore

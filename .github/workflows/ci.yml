@@ -1,0 +1,31 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  control:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: control
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: control/go.mod
+          cache-dependency-path: control/go.sum
+      - run: test -z "$(gofmt -l .)" || (gofmt -l . && exit 1)
+      - run: go vet ./...
+      - run: go test ./...
+
+  no-secrets:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: No env or key files are tracked
+        run: |
+          bad=$(git ls-files | grep -E '(^|/)(\.env(\..*)?|[^/]*\.env|env\.example|[^/]*\.key|state\.json|config\.txt)$' || true)
+          if [ -n "$bad" ]; then echo "Tracked secret-like files:"; echo "$bad"; exit 1; fi
