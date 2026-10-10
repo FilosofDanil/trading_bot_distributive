@@ -1,0 +1,4 @@
+# Same versions as the Strategy_tester lab the strategy was verified with.
+httpx==0.28.1
+numpy==2.5.2
+pandas==3.0.6

@@ -14,6 +14,7 @@ import (
 	"control/internal/config"
 	"control/internal/guard"
 	"control/internal/i18n"
+	"control/internal/runners"
 	"control/internal/store"
 )
 
@@ -28,6 +29,7 @@ type Bot struct {
 	defaultLang string
 	presetKey   string // keys from the server config; when set /start skips the key dialog
 	presetSec   string
+	rr          *runners.Registry // trading-bot runners; nil = none configured
 }
 
 type Options struct {
@@ -103,6 +105,17 @@ func (b *Bot) RegisterCommands() {
 			{Command: "language", Description: "English / Русский"},
 			{Command: "stop", Description: "Stop monitoring and delete keys"},
 			{Command: "help", Description: "Help"},
+			{Command: "bots", Description: "Trading bots and their state"},
+			{Command: "bot", Description: "One bot: details and controls"},
+			{Command: "pause", Description: "Pause a bot (no new positions)"},
+			{Command: "resume", Description: "Resume a bot"},
+			{Command: "run", Description: "Run the daily cycle now"},
+			{Command: "plan", Description: "Last plan of a bot"},
+			{Command: "positions", Description: "Open positions of a bot"},
+			{Command: "report", Description: "Performance report of a bot"},
+			{Command: "events", Description: "Recent events of a bot"},
+			{Command: "debug", Description: "Runner diagnostics"},
+			{Command: "ping", Description: "Check all runners"},
 		},
 		i18n.RU: {
 			{Command: "start", Description: "Подключить API-ключи и включить мониторинг"},
@@ -110,6 +123,17 @@ func (b *Bot) RegisterCommands() {
 			{Command: "language", Description: "English / Русский"},
 			{Command: "stop", Description: "Остановить мониторинг и удалить ключи"},
 			{Command: "help", Description: "Помощь"},
+			{Command: "bots", Description: "Торговые боты и их состояние"},
+			{Command: "bot", Description: "Один бот: детали и управление"},
+			{Command: "pause", Description: "Поставить бота на паузу"},
+			{Command: "resume", Description: "Возобновить бота"},
+			{Command: "run", Description: "Запустить дневной цикл сейчас"},
+			{Command: "plan", Description: "Последний план бота"},
+			{Command: "positions", Description: "Открытые позиции бота"},
+			{Command: "report", Description: "Отчёт по боту"},
+			{Command: "events", Description: "Последние события бота"},
+			{Command: "debug", Description: "Диагностика раннеров"},
+			{Command: "ping", Description: "Проверить все раннеры"},
 		},
 	}
 	for lang, cmds := range menus {
@@ -144,7 +168,7 @@ func (b *Bot) handle(ctx context.Context, up tgbotapi.Update) {
 	}()
 	switch {
 	case up.CallbackQuery != nil:
-		b.handleCallback(up.CallbackQuery)
+		b.handleCallback(ctx, up.CallbackQuery)
 	case up.Message != nil && up.Message.Chat.IsPrivate():
 		b.handleMessage(ctx, up.Message)
 	}
@@ -189,6 +213,8 @@ func (b *Bot) handleMessage(ctx context.Context, m *tgbotapi.Message) {
 			b.cmdCancel(chatID, lang)
 		case "help":
 			b.send(chatID, lang, i18n.T(lang, "help"))
+		case "bots", "bot", "pause", "resume", "run", "plan", "positions", "report", "events", "debug", "ping":
+			b.handleRunnerCommand(ctx, m, lang)
 		default:
 			b.send(chatID, lang, i18n.T(lang, "unknown"))
 		}
@@ -386,12 +412,16 @@ func (b *Bot) cmdLanguage(chatID int64, lang string) {
 	}
 }
 
-func (b *Bot) handleCallback(q *tgbotapi.CallbackQuery) {
+func (b *Bot) handleCallback(ctx context.Context, q *tgbotapi.CallbackQuery) {
 	_, _ = b.api.Request(tgbotapi.NewCallback(q.ID, ""))
-	if q.Message == nil || !strings.HasPrefix(q.Data, "lang:") {
+	if q.Message == nil || !b.isAllowed(q.From) {
 		return
 	}
-	if !b.isAllowed(q.From) {
+	if strings.HasPrefix(q.Data, "rb:") {
+		b.handleRunnerCallback(ctx, q)
+		return
+	}
+	if !strings.HasPrefix(q.Data, "lang:") {
 		return
 	}
 	lang := i18n.Normalize(strings.TrimPrefix(q.Data, "lang:"), b.defaultLang)

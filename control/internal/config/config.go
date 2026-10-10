@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -40,6 +41,45 @@ type Config struct {
 	EncryptionKey []byte // nil = auto-generate next to the state file
 	DefaultLang   string
 	Location      *time.Location
+
+	// Trading-bot runners (RUNNERS=name=url,...), driven over the HTTP API in docs/runner_api.md.
+	Runners            []Runner
+	ControlToken       string // sent as X-Control-Token
+	RunnerPollInterval time.Duration
+}
+
+// Runner is one trading-bot service.
+type Runner struct {
+	Name string
+	URL  string // without a trailing slash
+}
+
+var runnerName = regexp.MustCompile(`^[a-z0-9_-]+$`)
+
+// parseRunners parses "name=url,name2=url2".
+func parseRunners(s string) ([]Runner, error) {
+	var out []Runner
+	seen := map[string]bool{}
+	for _, part := range strings.Split(s, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		name, url, ok := strings.Cut(part, "=")
+		name, url = strings.TrimSpace(name), strings.TrimRight(strings.TrimSpace(url), "/")
+		if !ok || !runnerName.MatchString(name) {
+			return nil, fmt.Errorf("%q: runner name must match [a-z0-9_-]+ in name=url", part)
+		}
+		if !strings.HasPrefix(url, "http://") && !strings.HasPrefix(url, "https://") {
+			return nil, fmt.Errorf("%q: url must start with http:// or https://", part)
+		}
+		if seen[name] {
+			return nil, fmt.Errorf("duplicate runner name %q", name)
+		}
+		seen[name] = true
+		out = append(out, Runner{Name: name, URL: url})
+	}
+	return out, nil
 }
 
 // Load reads envFile (if present, local development only) and then the process environment.
@@ -86,6 +126,7 @@ func Load(envFile string) (*Config, error) {
 		{&c.BlockDuration, "BLOCK_DURATION", "24h"},
 		{&c.Period, "PERIOD", "24h"},
 		{&c.AlertResetAfter, "ALERT_RESET_AFTER", "1h"},
+		{&c.RunnerPollInterval, "RUNNER_POLL_INTERVAL", "30s"},
 	}
 	for _, d := range durations {
 		if *d.dst, err = time.ParseDuration(get(d.key, d.def)); err != nil {
@@ -111,6 +152,13 @@ func Load(envFile string) (*Config, error) {
 		if c.EncryptionKey, err = hex.DecodeString(k); err != nil || len(c.EncryptionKey) != 32 {
 			return nil, errors.New("ENCRYPTION_KEY must be 64 hex characters (32 bytes)")
 		}
+	}
+	if c.Runners, err = parseRunners(os.Getenv("RUNNERS")); err != nil {
+		return nil, fmt.Errorf("RUNNERS: %w", err)
+	}
+	c.ControlToken = strings.TrimSpace(os.Getenv("CONTROL_TOKEN"))
+	if len(c.Runners) > 0 && c.ControlToken == "" {
+		return nil, errors.New("CONTROL_TOKEN is required when RUNNERS is set")
 	}
 	return c, nil
 }

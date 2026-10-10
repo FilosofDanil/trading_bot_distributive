@@ -41,6 +41,38 @@ Host on Railway (one time, in the dashboard):
 5. Deploy and check the log for `telegram: authorized as @<bot>`. Stop any local copy that uses the same
    bot token first: two pollers on one token fight over `getUpdates` (HTTP 409).
 
+## Round 2 — `funding_carry` runner + bot management commands
+
+`funding_carry/` is the first trading bot: the lab's funding carry (spot long + perp short, pair stop −2 %),
+backtested at CAGR +3.1 % with a max DD of 0.9 %. It runs in **paper mode**, so no order is sent. Details are in
+[`funding_carry/README.md`](funding_carry/README.md), and the runner HTTP contract is in
+[`docs/runner_api.md`](docs/runner_api.md).
+
+Control polls every runner listed in `RUNNERS` every `RUNNER_POLL_INTERVAL` (30 s) and alerts in Telegram
+in three cases: a runner stops answering 3 times in a row (and again when it recovers), a strategy gets a new
+`last_error`, or a runner sends an event with `notify: true` (trades, pair stops, daily summary, pause / resume, restarts).
+
+| Command | What it does |
+|---|---|
+| `/bots` | every strategy: state, mode, positions, equity / PnL, time since the last poll; buttons ⏸ ▶️ 📋 📊 |
+| `/bot <id>` | card of one strategy + runner health; buttons pause / resume, plan, positions, report, run |
+| `/pause <id>`, `/resume <id>` | no new positions / back to normal (persisted on the runner) |
+| `/run <id>` | run today's cycle now (a preview if today is already done) |
+| `/plan <id>` | the last plan: book, opens / closes / resizes / stops, top funding, orders it would place, skipped coins |
+| `/positions <id>` | held pairs with funding, basis, fees, PnL |
+| `/report <id>` | paper record: return, annualized, max DD, funding / basis / fees, pairs, equity sparkline |
+| `/events <id> [n]` | the runner's last events |
+| `/debug [runner]` | URL, latency, fail streak, version, uptime, Binance reachability, memory, state size, last errors |
+| `/ping` | poll all runners now |
+
+`<id>` can be the full id (`funding.carry`), a unique prefix, or the runner name. It can be left out when there is a single strategy.
+
+| Control variable | Notes |
+|---|---|
+| `RUNNERS` | `funding=http://funding-carry.railway.internal:8080` (comma-separated `name=url`) |
+| `CONTROL_TOKEN` | shared secret with the runners, required when `RUNNERS` is set (sealed) |
+| `RUNNER_POLL_INTERVAL` | default `30s` |
+
 ## What the system does
 
 1. **Monitors the account**: balance, equity, daily PnL, drawdown from peak. Sends alerts to Telegram.

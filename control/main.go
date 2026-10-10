@@ -18,6 +18,7 @@ import (
 	"control/internal/bot"
 	"control/internal/config"
 	"control/internal/guard"
+	"control/internal/runners"
 	"control/internal/store"
 )
 
@@ -84,6 +85,16 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	if len(cfg.Runners) > 0 {
+		clients := make([]*runners.Client, 0, len(cfg.Runners))
+		for _, r := range cfg.Runners {
+			clients = append(clients, runners.NewClient(r.Name, r.URL, cfg.ControlToken))
+		}
+		reg := runners.NewRegistry(clients, cfg.RunnerPollInterval, cfg.DefaultLang, b)
+		b.SetRunners(reg)
+		go reg.Run(ctx)
+		log.Printf("runners: %d configured, poll every %s", len(clients), cfg.RunnerPollInterval)
+	}
 	go g.Run(ctx)
 	log.Printf("control: checking %d active account(s) every %s (alert %.0f%%, block %.0f%% for %s)",
 		len(st.Active()), cfg.CheckInterval, cfg.AlertLossPct, cfg.BlockLossPct, cfg.BlockDuration)
