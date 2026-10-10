@@ -286,8 +286,8 @@ var messages = map[string]map[string]string{
 		RU: "🚀 <b>%s</b>: дневной цикл запущен.",
 	},
 	"rr_run_preview": {
-		EN: "🔍 <b>%s</b>: today is already accepted, computing a preview plan only (see /plan).",
-		RU: "🔍 <b>%s</b>: сегодняшний день уже принят, считается только предварительный план (см. /plan).",
+		EN: "🔍 <b>%s</b>: today is already accepted, computing a preview plan only. It takes up to a few minutes; the result arrives as a message (then 📋 Plan shows it).",
+		RU: "🔍 <b>%s</b>: сегодняшний день уже принят, считается только предварительный план. Это занимает до нескольких минут; результат придёт сообщением (потом его покажет 📋 План).",
 	},
 	"rr_busy": {
 		EN: "⏳ <b>%s</b> is busy: <code>%s</code>",
@@ -308,6 +308,18 @@ var messages = map[string]map[string]string{
 	"plan_lists": {
 		EN: "Open: %s\nClose: %s\nResize: %s\nPair stopped: %s\nRehedge: %s\nTop funding (%% per 8h): %s\nMin funding: %s%% per 8h",
 		RU: "Открыть: %s\nЗакрыть: %s\nИзменить размер: %s\nПара остановлена: %s\nПерехеджировать: %s\nТоп фандинга (%% за 8ч): %s\nМин. фандинг: %s%% за 8ч",
+	},
+	"plan_paused": {
+		EN: "⏸ The bot is paused: no new pairs are opened, held ones are still managed. Without the pause it would open: %s. Press ▶️ Resume to trade.",
+		RU: "⏸ Бот на паузе: новые пары не открываются, открытые сопровождаются. Без паузы открыл бы: %s. Нажмите ▶️ Возобновить, чтобы торговать.",
+	},
+	"plan_below_min": {
+		EN: "💤 No coin reaches the minimum funding of %s%% per 8h, so the book is empty. This is normal: the bot waits and checks again every day.",
+		RU: "💤 Ни одна монета не дотягивает до минимального фандинга %s%% за 8ч, поэтому книга пустая. Это нормально: бот ждёт и проверяет снова каждый день.",
+	},
+	"rr_run_paused": {
+		EN: "⏸ <b>%s</b> is paused, so the plan opens no new pairs; it shows what a resume would open. Press ▶️ Resume to trade.",
+		RU: "⏸ <b>%s</b> на паузе, поэтому план не откроет новых пар; он покажет, что открылось бы после возобновления. Нажмите ▶️ Возобновить, чтобы торговать.",
 	},
 	"plan_orders_title": {EN: "Orders:", RU: "Ордера:"},
 	"hdr_orders":        {EN: "symbol|spot|perp|notional|ok", RU: "символ|спот|перп|объём|ок"},

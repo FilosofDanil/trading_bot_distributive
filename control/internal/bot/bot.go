@@ -251,7 +251,8 @@ func (b *Bot) handleMessage(ctx context.Context, m *tgbotapi.Message) {
 }
 
 func isButton(text, key string) bool {
-	return text == i18n.T(i18n.EN, key) || text == i18n.T(i18n.RU, key)
+	text = plainEmoji(text)
+	return text == plainEmoji(i18n.T(i18n.EN, key)) || text == plainEmoji(i18n.T(i18n.RU, key))
 }
 
 func (b *Bot) cmdStart(ctx context.Context, chatID int64, lang string) {

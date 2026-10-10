@@ -125,6 +125,8 @@ type Plan struct {
 	PairStopped []string              `json:"pair_stopped"`
 	Rehedge     []string              `json:"rehedge"`
 	Top         []FundingRate         `json:"top"`
+	WouldOpen   []string              `json:"would_open"` // paused: what a resume would open
+	Candidates  int                   `json:"candidates"`
 	MinF8       float64               `json:"min_f8"`
 	Skipped     map[string]string     `json:"skipped"`
 	Orders      []Order               `json:"orders"`

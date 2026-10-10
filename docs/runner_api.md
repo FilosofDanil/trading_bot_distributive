@@ -57,6 +57,10 @@ The last plan, or `404` if there is none yet.
  "idle": 250.4, "computed_at": "2026-10-10T00:05:40Z"}
 ```
 `top` lists the 5 highest 3-day mean funding rates per 8 h (as fractions: `0.0002` = 0.02 %).
+It is computed over all candidates even while the strategy is paused. When `paused` is true, `book`/`open`
+cover only the held pairs (no new ones) and `would_open` lists the pairs a resume would open; otherwise
+`would_open` is `[]`. `candidates` is the size of the candidate universe. A finished preview emits a
+`notify: true` event, so control forwards it to Telegram.
 
 ### `GET /v1/strategies/{id}/positions` → `[Position]`
 ```json

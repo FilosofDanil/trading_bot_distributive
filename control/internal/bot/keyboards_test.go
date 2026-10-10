@@ -39,6 +39,16 @@ func TestStrategyButtonsRoundTrip(t *testing.T) {
 	}
 }
 
+func TestButtonsWithoutEmojiSelector(t *testing.T) {
+	// some clients send "▶ Resume · id" back without U+FE0F
+	if a, id, ok := parseStrategyButton(plainEmoji(strategyButton(i18n.RU, "rb_resume", "funding.carry"))); !ok || a != "resume" || id != "funding.carry" {
+		t.Fatalf("resume without FE0F: %q %q %v", a, id, ok)
+	}
+	if !isButton(plainEmoji(i18n.T(i18n.EN, "btn_menu")), "btn_menu") {
+		t.Fatal("menu without FE0F must match")
+	}
+}
+
 func TestParseStrategyButtonRejects(t *testing.T) {
 	for _, text := range []string{"", "hello", i18n.T(i18n.EN, "rb_pause"), i18n.T(i18n.EN, "rb_pause") + idSep, "📊 Status"} {
 		if a, id, ok := parseStrategyButton(text); ok {

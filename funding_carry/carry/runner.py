@@ -146,23 +146,31 @@ class Runner:
             self.store.data["tags"] = tags
             self.store.save()
         paused = st["desired"] == "paused"
-        cands = [] if paused else universe.candidates(tags, day, market.spot_symbols())
-        plan = strategy.decide(day, st["held"], st["capital"], cands, cool=st.get("cool", {}))
+        cands = universe.candidates(tags, day, market.spot_symbols())
+        cool = st.get("cool", {})
+        # Paused = no new pairs, held pairs still managed: the acted-on plan sees only the held pairs.
+        # The full decision is still computed, so the plan keeps the funding top and what a resume would open.
+        full = strategy.decide(day, st["held"], st["capital"], cands, cool=cool)
+        plan = strategy.decide(day, st["held"], st["capital"], [], cool=cool) if paused else full
         plan["held_n"] = {s: v["n"] for s, v in st["held"].items()}
         od = strategy.orders(plan)
         used = (1 + strategy.P["buffer"]) * sum(plan["notional"].values())
         summary = _plain({
             "day": _day(day), "preview": preview, "accepted": not preview, "paused": paused, "equity": plan["equity"],
             "book": plan["book"], "open": plan["open"], "close": plan["close"], "resize": plan["resize"],
-            "pair_stopped": plan["pair_stopped"], "rehedge": plan["rehedge"], "top": plan["top"],
-            "min_f8": strategy.P["min_f8"], "skipped": plan["skipped"], "candidates": len(cands),
+            "pair_stopped": plan["pair_stopped"], "rehedge": plan["rehedge"], "top": full["top"],
+            "would_open": full["open"] if paused else [],
+            "min_f8": strategy.P["min_f8"], "skipped": {**full["skipped"], **plan["skipped"]}, "candidates": len(cands),
             "orders": od, "idle": plan["equity"] - used, "computed_at": now_iso()})
+        top = ", ".join(f"{s} {sc * 100:.3f} %" for s, sc in full["top"][:3]) or "none"
         if preview:
             with self.store.lock:
                 self.store.data["plan"] = summary
                 self.store.save()
-            self.store.event("info", f"preview {summary['day']}: book {', '.join(plan['book']) or 'empty'} "
-                                     f"({len(cands)} candidates, {time.time() - t0:.0f} s)")
+            note = f"; paused, a resume would open {', '.join(summary['would_open']) or 'nothing'}" if paused else ""
+            self.store.event("info", f"preview {summary['day']}: book {', '.join(plan['book']) or 'empty'}{note}; "
+                                     f"top funding/8h {top} (min {strategy.P['min_f8'] * 100:.3f} %); "
+                                     f"{len(cands)} candidates, {time.time() - t0:.0f} s", True)
             return summary
 
         rates = {}
@@ -181,7 +189,6 @@ class Runner:
         for level, msg, notify in res["events"]:
             self.store.event(level, msg, notify)
         row = res["row"]
-        top = ", ".join(f"{s} {sc * 100:.3f} %" for s, sc in plan["top"][:3]) or "none"
         self.store.event("info", f"day {row['day']}: book {', '.join(row['book']) or 'empty'}, equity {row['equity']:.2f} "
                                  f"USDT (funding {row['funding']:+.2f}, basis {row['basis']:+.2f}, fees {row['fees']:+.2f}); "
                                  f"top funding/8h {top}; {len(cands)} candidates, {time.time() - t0:.0f} s", True)

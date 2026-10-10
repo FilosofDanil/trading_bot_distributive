@@ -181,7 +181,21 @@ func (b *Bot) cmdRun(ctx context.Context, chatID int64, lang, query string) {
 	if res.Preview {
 		key = "rr_run_preview"
 	}
-	b.send(chatID, lang, i18n.T(lang, key, guard.Escape(id)))
+	msg := i18n.T(lang, key, guard.Escape(id))
+	if b.isPaused(id) {
+		msg += "\n\n" + i18n.T(lang, "rr_run_paused", guard.Escape(id))
+	}
+	b.send(chatID, lang, msg)
+}
+
+// isPaused reports whether the last polled state of strategy id asks for a pause.
+func (b *Bot) isPaused(id string) bool {
+	for _, r := range b.allStrategies() {
+		if r.s.ID == id {
+			return r.s.Desired == "paused"
+		}
+	}
+	return false
 }
 
 func (b *Bot) cmdPlan(ctx context.Context, chatID int64, lang, query string) {
@@ -199,6 +213,12 @@ func (b *Bot) cmdPlan(ctx context.Context, chatID int64, lang, query string) {
 		yn(lang, p.Paused), guard.Money(p.Equity), guard.Money(p.Idle), list(p.Book))
 	head += "\n" + i18n.T(lang, "plan_lists", list(p.Open), list(p.Close), resizeList(p.Resize), list(p.PairStopped),
 		list(p.Rehedge), topList(p.Top), f4(p.MinF8*100))
+	switch {
+	case p.Paused:
+		head += "\n\n" + i18n.T(lang, "plan_paused", list(p.WouldOpen))
+	case len(p.Book) == 0 && (len(p.Top) == 0 || p.Top[0].F8 < p.MinF8):
+		head += "\n\n" + i18n.T(lang, "plan_below_min", f4(p.MinF8*100))
+	}
 
 	var rows []string
 	if len(p.Orders) > 0 {

@@ -130,11 +130,16 @@ func strategyKeyboard(lang, id string) tgbotapi.ReplyKeyboardMarkup {
 	)
 }
 
+// plainEmoji drops U+FE0F (emoji presentation selector): some Telegram clients send a button's
+// text back without it ("▶" instead of "▶️"), so button texts are compared without it.
+func plainEmoji(s string) string { return strings.ReplaceAll(s, "\uFE0F", "") }
+
 // parseStrategyButton maps "<label> · <id>" (either language) back to a runner action.
 func parseStrategyButton(text string) (action, id string, ok bool) {
+	text = plainEmoji(text)
 	for _, a := range strategyActions {
 		for _, lang := range []string{i18n.EN, i18n.RU} {
-			if rest, found := strings.CutPrefix(text, i18n.T(lang, a.key)+idSep); found && strings.TrimSpace(rest) != "" {
+			if rest, found := strings.CutPrefix(text, plainEmoji(i18n.T(lang, a.key))+idSep); found && strings.TrimSpace(rest) != "" {
 				return a.action, strings.TrimSpace(rest), true
 			}
 		}

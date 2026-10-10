@@ -49,3 +49,18 @@ PAPER mode only: the lab rule is live orders only after explicit approval + IP-l
 - [x] tests: keyboards_test.go (round-trip of every button, views); go vet + go test pass
 - [x] Railway redeploy of control: deployment 1692ecd7 (commit 878f84d) SUCCESS
 - [ ] Owner: in Telegram tap 🤖 Bots → a bot → buttons
+
+# Bugfix 2026-10-10 — empty plan after pause + "Run", bot looked stuck
+
+Cause (runner log): day 10-10 accepted with 156 candidates, top funding 0.012 %/8h < min 0.02 % → book empty;
+then pause; then two "Run" presses → previews with `cands = []` while paused → 0 candidates, no top,
+overwrote the day's plan; preview event had notify=false → no Telegram message ("hangs"). No resume was sent.
+
+- [x] funding_carry/runner.py: candidates always computed; paused plan = held pairs only, plus the full decision
+      for `top` and `would_open`; preview event notify=true with top funding + min threshold
+- [x] tests/test_runner.py: paused preview keeps top + would_open, running preview decides once (13 pytest pass)
+- [x] control: Plan.WouldOpen/Candidates; plan notes (paused: would open …; empty book below min funding);
+      "Run" while paused explains it; preview reply says the result arrives as a message
+- [x] control: button texts compared without U+FE0F (▶️ Resume / ⬅️ Menu from clients that strip it)
+- [x] docs/runner_api.md: would_open, candidates, preview notify
+- [ ] commit + push → Railway redeploys control and funding-carry; verify logs
