@@ -47,5 +47,5 @@ PAPER mode only: the lab rule is live orders only after explicit approval + IP-l
       per-chat keyboard view; presses parsed from message text; old inline presses re-send the menu
 - [x] removed InlineKeyboard / callback routing (runners.go, bot.go); getUpdates names allowed_updates explicitly
 - [x] tests: keyboards_test.go (round-trip of every button, views); go vet + go test pass
-- [ ] Railway redeploy of control
+- [x] Railway redeploy of control: deployment 1692ecd7 (commit 878f84d) SUCCESS
 - [ ] Owner: in Telegram tap 🤖 Bots → a bot → buttons
