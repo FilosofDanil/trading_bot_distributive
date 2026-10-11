@@ -2,6 +2,7 @@ package bot
 
 import (
 	"testing"
+	"time"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 
@@ -32,10 +33,35 @@ func TestStrategyButtonsRoundTrip(t *testing.T) {
 				}
 				seen[action] = true
 			}
-			if len(seen) != len(strategyActions) {
+			if len(seen) != len(strategyActions)-1 || seen["flatten_yes"] { // the confirmation has its own keyboard
 				t.Errorf("%s/%s: actions %v", lang, id, seen)
 			}
 		}
+	}
+}
+
+func TestFlattenNeedsAFreshConfirmationForTheSameBot(t *testing.T) {
+	b := &Bot{}
+	const chat = 5
+	b.askFlatten(chat, "funding.carry")
+	kb := texts(b.keyboardFor(chat, i18n.RU))
+	if a, id, ok := parseStrategyButton(kb[0]); !ok || a != "flatten_yes" || id != "funding.carry" {
+		t.Fatalf("confirmation keyboard: %v", kb)
+	}
+	if b.takeFlatten(chat, "other") {
+		t.Fatal("a confirmation for another bot must not count")
+	}
+	if b.takeFlatten(chat, "funding.carry") {
+		t.Fatal("a request is consumed by the first answer")
+	}
+	b.askFlatten(chat, "funding.carry")
+	b.flatten[chat] = flattenAsk{"funding.carry", time.Now().Add(-flattenTTL - time.Second)}
+	if b.takeFlatten(chat, "funding.carry") {
+		t.Fatal("an expired request must not count")
+	}
+	b.askFlatten(chat, "funding.carry")
+	if !b.takeFlatten(chat, "funding.carry") {
+		t.Fatal("a fresh confirmation must count")
 	}
 }
 

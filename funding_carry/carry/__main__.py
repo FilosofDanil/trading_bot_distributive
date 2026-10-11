@@ -2,8 +2,10 @@
 python -m carry once [--day YYYY-MM-DD] [--preview]   one cycle now against STATE_FILE (local debugging)
 
 Environment: CONTROL_TOKEN (required to serve /v1/*), PORT (8080), STATE_FILE (/data/carry_state.json),
-CARRY_CAPITAL (paper capital in USDT, 500; used only when the state file is created), RUN_AFTER_MIN (5),
-MODE (paper; anything else is refused: live execution is not implemented on purpose).
+CARRY_CAPITAL (capital in USDT, 500; used only when the state file is created), RUN_AFTER_MIN (5),
+MODE (paper | live). Live also reads BINANCE_API_KEY + BINANCE_API_SECRET or BINANCE_PRIVATE_KEY (Ed25519 PEM),
+MAX_COINS (3), STATE_FILE (/data/carry_live_state.json), LIQ_TOPUP_DIST / LIQ_CLOSE_DIST / LIQ_CLOSE_RISE /
+LIQ_STOP_RISE (carry/live.py Protect).
 """
 from __future__ import annotations
 
@@ -23,12 +25,32 @@ from .state import Store
 
 def _runner() -> Runner:
     mode = os.environ.get("MODE", "paper").strip().lower()
-    if mode != "paper":
-        raise SystemExit(f"MODE={mode!r}: only paper is implemented. Live orders need the owner's explicit approval, "
-                         "an IP-locked key and a paper record first (Strategy_tester reports/critique).")
+    if mode not in ("paper", "live"):
+        raise SystemExit(f"MODE={mode!r}: use paper or live")
     capital = float(os.environ.get("CARRY_CAPITAL", "500"))
-    store = Store(os.environ.get("STATE_FILE", "/data/carry_state.json"), capital)
-    return Runner(store, int(os.environ.get("RUN_AFTER_MIN", "5")), mode)
+    run_after = int(os.environ.get("RUN_AFTER_MIN", "5"))
+    if mode == "paper":
+        return Runner(Store(os.environ.get("STATE_FILE", "/data/carry_state.json"), capital), run_after, mode)
+
+    # live: its own state file (the paper record stays as it was), at most MAX_COINS pairs
+    from . import strategy
+    from .exchange import Binance
+    from .live import Live, Protect
+    strategy.P["k"] = int(os.environ.get("MAX_COINS", "3"))
+    store = Store(os.environ.get("STATE_FILE", "/data/carry_live_state.json"), capital)
+    ex = Binance.from_env()
+    try:
+        missing = ex.check_permissions()
+    except Exception as exc:                              # noqa: BLE001
+        missing = [f"cannot read the key's permissions ({type(exc).__name__}: {exc})"]
+    if missing:
+        store.event("error", f"{STRATEGY_ID}: live trading is OFF - the Binance key lacks: {', '.join(missing)}. "
+                             f"An HMAC key without an IP whitelist is read-only; use a self-generated Ed25519 key "
+                             f"(BINANCE_PRIVATE_KEY) or an IP-restricted key on a static IP.", True)
+        return Runner(store, run_after, "live-blocked")
+    live = Live(ex, store, Protect.from_env())
+    live.reconcile()
+    return Runner(store, run_after, "live", live)
 
 
 def serve() -> None:
@@ -54,6 +76,12 @@ def serve() -> None:
     runner.store.event("info", f"{STRATEGY_ID} v{VERSION} started: mode {runner.mode}, equity {st['capital']:.2f} USDT, "
                                f"{len(st['held'])} pair(s), {st['desired']}", True)
     threading.Thread(target=runner.loop, args=(stop,), daemon=True).start()
+    if runner.live is not None:
+        threading.Thread(target=runner.watch, args=(stop,), daemon=True).start()
+        p = runner.live.p
+        runner.store.event("info", f"{STRATEGY_ID}: LIVE with liquidation guard every 30 s: add margin when the "
+                                   f"liquidation is < {p.topup_dist:.0%} away, close the pair at perp +{p.close_rise:.0%} "
+                                   f"or liquidation < {p.close_dist:.0%} away, exchange stop at +{p.stop_rise:.0%}", True)
     print(f"funding-carry: API on [::]:{port}, state {runner.store.path}", flush=True)
     srv.serve_forever()
     # wait for a running cycle so the state is never left half-written (it is saved atomically anyway)

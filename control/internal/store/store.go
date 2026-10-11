@@ -36,6 +36,13 @@ type Snapshot struct {
 	LossPct       float64   `json:"loss_pct"`
 	OpenPositions int       `json:"open_positions"`
 	Error         string    `json:"error,omitempty"`
+
+	// Carry exclusion (main account shared with a live carry bot). UnrealizedPnL and OpenPositions
+	// already leave out the carry symbols; Adjust = net transfers into futures + income booked on
+	// carry symbols since the window start, and is subtracted from the wallet in Equity.
+	Adjust     float64 `json:"adjust,omitempty"`
+	CarryUPnL  float64 `json:"carry_upnl,omitempty"`
+	CarryCount int     `json:"carry_positions,omitempty"`
 }
 
 type User struct {
@@ -62,6 +69,9 @@ type User struct {
 	BlockedUntil time.Time `json:"blocked_until"`
 
 	Last Snapshot `json:"last"`
+
+	CarrySymbols []string `json:"carry_symbols,omitempty"` // symbols held by a live carry bot during this window
+	PausedCarry  []string `json:"paused_carry,omitempty"`  // carry strategies paused by the block, resumed after it
 }
 
 type Store struct {

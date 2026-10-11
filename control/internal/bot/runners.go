@@ -61,6 +61,10 @@ func (b *Bot) runnerAction(ctx context.Context, chatID int64, lang string, by in
 			}
 		}
 		b.cmdEvents(ctx, chatID, lang, query, min(max(n, 1), 50))
+	case "flatten":
+		b.cmdFlatten(ctx, chatID, lang, by, arg, false)
+	case "flatten_yes":
+		b.cmdFlatten(ctx, chatID, lang, by, arg, true)
 	case "debug":
 		b.cmdDebug(chatID, lang, arg)
 	case "ping":
@@ -186,6 +190,33 @@ func (b *Bot) cmdRun(ctx context.Context, chatID int64, lang, query string) {
 		msg += "\n\n" + i18n.T(lang, "rr_run_paused", guard.Escape(id))
 	}
 	b.send(chatID, lang, msg)
+}
+
+// cmdFlatten is the kill switch: the first press asks, the confirmation (within flattenTTL) closes all.
+func (b *Bot) cmdFlatten(ctx context.Context, chatID int64, lang string, by int64, query string, confirmed bool) {
+	c, id, err := b.rr.Find(query)
+	if err != nil {
+		b.sendErr(chatID, lang, id, err)
+		return
+	}
+	if !confirmed {
+		b.askFlatten(chatID, id)
+		b.send(chatID, lang, i18n.T(lang, "flatten_confirm", guard.Escape(id), int(flattenTTL.Minutes())))
+		return
+	}
+	if !b.takeFlatten(chatID, id) {
+		b.setView(chatID, viewStrat+id)
+		b.send(chatID, lang, i18n.T(lang, "flatten_expired", guard.Escape(id)))
+		return
+	}
+	b.setView(chatID, viewStrat+id)
+	if _, err := c.Flatten(ctx, id, by); err != nil {
+		b.sendErr(chatID, lang, id, err)
+		return
+	}
+	log.Printf("runner %s: flatten by user %d", id, by)
+	b.send(chatID, lang, i18n.T(lang, "flatten_started", guard.Escape(id)))
+	b.rr.PollNow(ctx)
 }
 
 // isPaused reports whether the last polled state of strategy id asks for a pause.
@@ -436,6 +467,8 @@ func modeLabel(lang, mode string) string {
 		return i18n.T(lang, "mode_paper")
 	case "live":
 		return i18n.T(lang, "mode_live")
+	case "live-blocked":
+		return i18n.T(lang, "mode_live_blocked")
 	}
 	return guard.Escape(strings.ToUpper(mode))
 }

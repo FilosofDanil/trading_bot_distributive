@@ -63,4 +63,32 @@ overwrote the day's plan; preview event had notify=false → no Telegram message
       "Run" while paused explains it; preview reply says the result arrives as a message
 - [x] control: button texts compared without U+FE0F (▶️ Resume / ⬅️ Menu from clients that strip it)
 - [x] docs/runner_api.md: would_open, candidates, preview notify
-- [ ] commit + push → Railway redeploys control and funding-carry; verify logs
+- [x] commit + push → Railway redeploys control and funding-carry; verify logs (df607c2 SUCCESS both)
+
+# Round 3 — LIVE carry with liquidation protection (owner decision 2026-10-11)
+
+Owner decisions: Binance key WITHOUT IP restriction, stay on Railway Hobby; MAIN account (LossGuard must be
+hedge-aware); 500 USDT live capital, max 3 coins; fully automatic opens. Live stays OFF (MODE=paper) until
+the owner sets the key on funding-carry and says to switch.
+
+Liquidation protection (short perp leg), in order of price rise:
+  L0 margin buffer: isolated 1x, total margin 2N per leg N (liquidation ~ +195 %)
+  L1 watchdog every 30 s: liq distance < 60 % → add isolated margin (futures wallet, then spot transfer)
+  L2 watchdog: perp >= +90 % since ref or liq distance < 25 % → close the pair (both legs), 7-day cooldown
+  L3 exchange-side STOP_MARKET (close short) at +120 % from ref — works while the bot is down
+  L4 leg check: a leg missing / qty mismatch > 5 % → close the other leg / fix, alert
+  L5 kill switch: 🛑 Close all (with confirmation) → flatten + pause
+
+- [x] research: Binance API details → scratchpad/binance_live_api.md. FINDING: an HMAC key without an IP
+      whitelist is READ-ONLY (Binance support article 2025-03-20) → use a self-generated Ed25519 key
+      (unconfirmed without IP) or a static IP. Conditional orders: Algo Service only (-4120 on /fapi/v1/order).
+- [x] funding_carry/carry/exchange.py — signed spot/fapi/sapi client, HMAC + Ed25519, permission check
+- [x] funding_carry/carry/live.py — executor (open/close/resize/rehedge with real fills, undo on failure) + watchdog L1–L4
+- [x] runner: MODE=live wiring, separate state file, MAX_COINS, startup reconcile, flatten API, live-blocked
+- [x] tests: test_live.py (fake exchange, 14) + test_exchange.py (mock HTTP, 8): 35 pytest pass
+- [x] control/guard: exempt live carry symbols (upnl, enforcement), adjust loss for transfers + carry income
+      (guard/carry.go, binance.IncomeSince, carry_test.go: pumped short / carry close / block spares the pair)
+- [x] control: LossGuard block → pause carry opens; unblock → resume (only if control paused it) (bot/carry.go)
+- [x] control: 🛑 Close all button with confirmation (2 min); live / live-blocked labels
+- [x] docs + README; gofmt/vet/test, pytest, docker build both; live gate vs real Binance → live-blocked
+- [ ] commit + push, deploy in paper mode; owner sets key → switch MODE=live

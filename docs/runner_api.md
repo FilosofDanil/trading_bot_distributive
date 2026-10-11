@@ -45,6 +45,13 @@ Starts the daily cycle now, in the background. If today's day was already accept
 preview plan only and does not change state. The response is `{"ok": true, "started": true, "preview": false}`,
 or `409 {"error": "busy"}` if a run is already in progress.
 
+### `POST /v1/strategies/{id}/flatten`
+Kill switch, live mode only. Body `{"confirm": true, "by": 891477091}` (without `"confirm": true` → `400`).
+Pauses the strategy, then closes every pair in the background; the result arrives as a `notify: true` event.
+`409` if the runner is not live. Strategy `mode` is `paper`, `live`, or `live-blocked` (live requested, but the
+key lacks permissions: no orders are sent). Control's LossGuard leaves the `book` symbols of `live` strategies
+out of its loss measure and block enforcement.
+
 ### `GET /v1/strategies/{id}/plan`
 The last plan, or `404` if there is none yet.
 ```json

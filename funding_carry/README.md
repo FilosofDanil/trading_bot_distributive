@@ -1,4 +1,4 @@
-# funding_carry — funding-carry runner (PAPER)
+# funding_carry — funding-carry runner (paper or live)
 
 A market-neutral **funding carry** strategy: a spot long and a perp short of equal quantity on coins whose
 perpetual pays positive funding, so the short collects funding while the price risk cancels out. This is a
@@ -20,13 +20,48 @@ port of `Engine/Strategy_tester/lab/carry_live.py`, the "safe carry" the lab rec
 on 1000 random markets and agreed on every one, covering opens, the keep band, pair stops, re-hedges, resizes
 and cooldowns.
 
-## Paper mode only
+## Paper mode (default)
 
-The runner simulates fills at the daily open, the same way the backtest does, and **never sends an order**.
-`MODE` accepts only `paper`. Live execution needs three things: the owner's explicit approval, an
-IP-locked Binance key (Railway Hobby has no static outbound IP), and a few weeks of paper record with a
-non-empty book. The paper PnL follows `lab/carry.run_carry`: the funding settled on the short, plus the
-basis change, minus fees (spot taker 0.10 % + perp taker 0.05 % + 2 × 0.02 % slippage per pair entry or exit).
+`MODE=paper` simulates fills at the daily open, the same way the backtest does, and **never sends an order**.
+The paper PnL follows `lab/carry.run_carry`: the funding settled on the short, plus the basis change, minus
+fees (spot taker 0.10 % + perp taker 0.05 % + 2 × 0.02 % slippage per pair entry or exit).
+
+## Live mode (`MODE=live`, owner decision 2026-10-11)
+
+The same decision, carried out with real market orders on the owner's main account (`carry/live.py`,
+`carry/exchange.py`): at most `MAX_COINS` (3) pairs, capital `CARRY_CAPITAL` (500 USDT), its own state file
+`/data/carry_live_state.json` (the paper record is kept). Every order is tagged `fc-…`, every exchange stop
+`fcs-…`; the bot never cancels or closes anything else. It does not open a pair on a symbol where the account
+already has a futures position.
+
+A pair opens as: margin 2N moved spot → futures, isolated 1x short of q, spot buy of q grossed up for the fee
+charged in the coin, the rest of the margin added, an exchange stop. Any failed step is undone (the short is
+bought back, the margin returned) and reported.
+
+**Liquidation protection** (watchdog every 30 s, plus the exchange stop):
+
+| Level | Trigger (defaults, env) | Action |
+|---|---|---|
+| L0 | always | isolated margin 2N per leg N: liquidation at about +195 % |
+| L1 | liquidation < 60 % above the mark (`LIQ_TOPUP_DIST`) | add margin (half the notional) from futures, then spot; at most every 10 min |
+| L2 | perp +90 % since entry (`LIQ_CLOSE_RISE`) or liquidation < 25 % away (`LIQ_CLOSE_DIST`) | close the pair, 7-day cooldown |
+| L3 | exchange STOP_MARKET (Algo Service, mark price) at +120 % (`LIQ_STOP_RISE`) | closes the short even while the bot is down; re-placed if missing |
+| L4 | a leg is gone (stop fired, liquidated, sold by hand) | close the other leg, 7-day cooldown |
+| L5 | 🛑 Close all in Telegram (with confirmation) | `POST /v1/strategies/{id}/flatten`: close every pair, pause |
+
+The lab closes or re-hedges only once a day; L1–L2 act within the day, so a pump is cut at +90 % instead of
+riding to the next 00:05 UTC.
+
+**The key.** Binance gives an HMAC key **without an IP whitelist only read permission**, and Railway Hobby
+has no static outbound IP. So: a self-generated **Ed25519** key (`BINANCE_API_KEY` + `BINANCE_PRIVATE_KEY`
+PEM), or an IP-restricted key on a static IP (`BINANCE_API_SECRET`). Permissions needed: reading, spot &
+margin trading, futures, universal transfer; withdrawals OFF. At start the runner reads
+`/sapi/v1/account/apiRestrictions`; if anything is missing it stays in `live-blocked` (no orders, no cycle)
+and says what is missing in Telegram.
+
+**LossGuard** (control) shares the account: it leaves the carry symbols out of the loss and of the block
+enforcement, takes transfers and carry income out of the wallet change, and pauses the carry's new entries
+during a block (`control/internal/guard/carry.go`, `control/internal/bot/carry.go`).
 
 ## Daily cycle (00:05 UTC)
 
@@ -61,9 +96,13 @@ a volume at `/data`. The image runs the tests at build time.
 | Variable | Notes |
 |---|---|
 | `CONTROL_TOKEN` | shared with control (sealed) |
-| `CARRY_CAPITAL` | paper capital in USDT, default 500. Used only when the state file is first created |
+| `CARRY_CAPITAL` | capital in USDT, default 500. Used only when the state file is first created |
 | `RUN_AFTER_MIN` | minutes after 00:00 UTC, default 5 |
-| `STATE_FILE`, `PORT`, `MODE` | image defaults: `/data/carry_state.json`, `8080`, `paper` |
+| `STATE_FILE`, `PORT`, `MODE` | image defaults: `/data/carry_state.json` (live: `/data/carry_live_state.json`), `8080`, `paper` |
+| `BINANCE_API_KEY` | live only (sealed) |
+| `BINANCE_PRIVATE_KEY` or `BINANCE_API_SECRET` | live only (sealed): Ed25519 PEM (newlines may be written as `\n`) or HMAC secret |
+| `MAX_COINS` | live only, default 3 |
+| `LIQ_TOPUP_DIST`, `LIQ_CLOSE_DIST`, `LIQ_CLOSE_RISE`, `LIQ_STOP_RISE` | live protection levels, defaults 0.60 / 0.25 / 0.90 / 1.20 |
 
 The region must not be in the US, because Binance answers 451 there. The runner raises `RestrictedLocation`,
 and control shows it as the strategy error.

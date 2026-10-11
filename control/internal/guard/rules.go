@@ -39,6 +39,7 @@ func StartPeriod(u *store.User, wallet float64, now time.Time) {
 	u.Baseline = wallet
 	u.Alerted = false
 	u.AlertedAt = time.Time{}
+	u.CarrySymbols = nil // the caller re-adds the symbols still held
 }
 
 // Evaluate applies a fresh snapshot to the user's state and returns what to do.
@@ -53,6 +54,11 @@ func Evaluate(u *store.User, snap store.Snapshot, now time.Time, r Rules) Decisi
 	}
 	if !u.Blocked && (u.PeriodStart.IsZero() || u.Baseline <= 0 || !now.Before(u.PeriodStart.Add(r.Period))) {
 		StartPeriod(u, snap.WalletBalance, now)
+	}
+	if u.PeriodStart.Equal(now) && snap.Adjust != 0 {
+		// a fresh window: its baseline is the wallet as it is now, nothing booked since
+		snap.Equity += snap.Adjust
+		snap.Adjust = 0
 	}
 
 	snap.LossAmount, snap.LossPct = Loss(u.Baseline, snap.Equity)

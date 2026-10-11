@@ -104,19 +104,31 @@ func (c *Client) Strategies(ctx context.Context) ([]Strategy, error) {
 
 // Pause stops new positions; by is the Telegram user id.
 func (c *Client) Pause(ctx context.Context, id string, by int64) (Strategy, error) {
-	return c.setDesired(ctx, id, "pause", by)
+	return c.SetDesired(ctx, id, true, by, "tg")
 }
 
 func (c *Client) Resume(ctx context.Context, id string, by int64) (Strategy, error) {
-	return c.setDesired(ctx, id, "resume", by)
+	return c.SetDesired(ctx, id, false, by, "tg")
 }
 
-func (c *Client) setDesired(ctx context.Context, id, action string, by int64) (Strategy, error) {
+// SetDesired pauses (pause=true) or resumes a strategy; reason is recorded in the runner's event.
+func (c *Client) SetDesired(ctx context.Context, id string, pause bool, by int64, reason string) (Strategy, error) {
+	action := "resume"
+	if pause {
+		action = "pause"
+	}
 	var r struct {
 		Strategy Strategy `json:"strategy"`
 	}
-	err := c.do(ctx, http.MethodPost, sPath(id, "/"+action), map[string]any{"by": by, "reason": "tg"}, &r)
+	err := c.do(ctx, http.MethodPost, sPath(id, "/"+action), map[string]any{"by": by, "reason": reason}, &r)
 	return r.Strategy, err
+}
+
+// Flatten closes every live pair of the strategy and pauses it (kill switch; live mode only).
+func (c *Client) Flatten(ctx context.Context, id string, by int64) (RunResult, error) {
+	var r RunResult
+	err := c.do(ctx, http.MethodPost, sPath(id, "/flatten"), map[string]any{"confirm": true, "by": by}, &r)
+	return r, err
 }
 
 // Run starts the daily cycle now (a 409 "busy" comes back as an *HTTPError).

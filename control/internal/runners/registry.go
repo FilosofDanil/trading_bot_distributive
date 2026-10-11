@@ -210,6 +210,25 @@ func (r *Registry) Snapshot() []RunnerSnap {
 // Client returns the client of a runner by name.
 func (r *Registry) Client(name string) *Client { return r.clients[name] }
 
+// LiveSymbols are the symbols held by strategies trading live (mode "live"), from the last snapshot.
+// LossGuard leaves them out: each is one leg of a hedged pair.
+func (r *Registry) LiveSymbols() map[string]bool {
+	if r.Empty() {
+		return nil
+	}
+	out := map[string]bool{}
+	for _, s := range r.Snapshot() {
+		for _, st := range s.Strategies {
+			if st.Mode == "live" {
+				for _, sym := range st.Book {
+					out[sym] = true
+				}
+			}
+		}
+	}
+	return out
+}
+
 // Find resolves a strategy from the last snapshot: exact id, else a unique id prefix, else a runner
 // name that has exactly one strategy; an empty query matches when there is exactly one strategy overall.
 func (r *Registry) Find(query string) (*Client, string, error) {

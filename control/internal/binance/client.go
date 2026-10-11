@@ -260,6 +260,48 @@ func (c *Client) ClosePosition(ctx context.Context, p Position, hedge bool) erro
 	return c.call(ctx, http.MethodPost, "/fapi/v1/order", params, nil)
 }
 
+// Income is one record of the futures income history (GET /fapi/v1/income).
+type Income struct {
+	Symbol     string `json:"symbol"` // empty for transfers
+	IncomeType string `json:"incomeType"`
+	Income     Num    `json:"income"` // signed, in Asset
+	Asset      string `json:"asset"`
+	Time       int64  `json:"time"`
+	TranID     Num    `json:"tranId"`
+}
+
+// IncomeSince returns every income record with time >= since, oldest first, following pages.
+func (c *Client) IncomeSince(ctx context.Context, since time.Time) ([]Income, error) {
+	const limit = 1000
+	var all []Income
+	seen := map[string]bool{}
+	from := since.UnixMilli()
+	for page := 0; page < 20; page++ {
+		var part []Income
+		p := url.Values{"startTime": {strconv.FormatInt(from, 10)}, "limit": {strconv.Itoa(limit)}}
+		if err := c.call(ctx, http.MethodGet, "/fapi/v1/income", p, &part); err != nil {
+			return nil, err
+		}
+		for _, in := range part {
+			k := string(in.TranID) + "|" + in.IncomeType + "|" + in.Symbol + "|" + strconv.FormatInt(in.Time, 10)
+			if !seen[k] {
+				seen[k] = true
+				all = append(all, in)
+			}
+		}
+		if len(part) < limit {
+			return all, nil
+		}
+		// the next page starts at the last timestamp (not +1): records sharing it are deduplicated
+		if last := part[len(part)-1].Time; last > from {
+			from = last
+		} else {
+			from++
+		}
+	}
+	return nil, errors.New("income history: more than 20 pages")
+}
+
 // FuturesEnabled checks the key's permissions (spot API). ok=false with err=nil means
 // the key exists but futures trading is not enabled on it.
 func (c *Client) FuturesEnabled(ctx context.Context) (bool, error) {

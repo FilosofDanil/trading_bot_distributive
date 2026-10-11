@@ -33,8 +33,9 @@ type Bot struct {
 	presetSec   string
 	rr          *runners.Registry // trading-bot runners; nil = none configured
 
-	viewMu sync.Mutex
-	views  map[int64]string // chat id -> keyboard view (keyboards.go); absent = main menu
+	viewMu  sync.Mutex
+	views   map[int64]string     // chat id -> keyboard view (keyboards.go); absent = main menu
+	flatten map[int64]flattenAsk // pending "close all" confirmations
 }
 
 type Options struct {
@@ -400,6 +401,9 @@ func StatusText(st *store.Store, g *guard.Guard, chatID int64, lang string, now 
 	}
 	if l.Error != "" {
 		state += "\n" + i18n.T(lang, "state_error", guard.Escape(l.Error))
+	}
+	if l.CarryCount > 0 || l.Adjust != 0 {
+		state += i18n.T(lang, "status_carry", l.CarryCount, guard.Signed(l.CarryUPnL), guard.Signed(l.Adjust))
 	}
 	return i18n.T(lang, "status",
 		guard.Human(now.Sub(l.CheckedAt), lang),

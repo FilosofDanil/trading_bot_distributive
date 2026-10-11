@@ -111,6 +111,14 @@ def make_server(runner: Runner, token: str, port: int, host: str = "::") -> Serv
                     b = self._body()
                     s = runner.set_desired("paused" if action == "pause" else "running", b.get("by"), str(b.get("reason", "")))
                     return self._send(200, {"ok": True, "strategy": s})
+                if method == "POST" and action == "flatten":
+                    b = self._body()
+                    if b.get("confirm") is not True:
+                        return self._send(400, {"error": 'flatten needs {"confirm": true}'})
+                    try:
+                        return self._send(200, runner.flatten(b.get("by")))
+                    except ValueError as exc:
+                        return self._send(409, {"error": str(exc)})
                 if method == "POST" and action == "run":
                     try:
                         return self._send(200, runner.trigger())

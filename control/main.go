@@ -78,6 +78,9 @@ func main() {
 			Period:          cfg.Period,
 			AlertResetAfter: cfg.AlertResetAfter,
 		},
+		Exempt:    b.CarrySymbols,
+		OnBlock:   b.OnGuardBlock,
+		OnUnblock: b.OnGuardUnblock,
 	}, st, b)
 	b.SetGuard(g)
 	b.RegisterCommands()

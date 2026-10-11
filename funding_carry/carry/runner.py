@@ -31,13 +31,17 @@ def _plain(x):
 
 
 class Runner:
-    def __init__(self, store: Store, run_after_min: int = 5, mode: str = "paper"):
+    def __init__(self, store: Store, run_after_min: int = 5, mode: str = "paper", live=None):
+        """mode: paper | live | live-blocked (live requested, but the key cannot trade: no orders, no cycle).
+        live: a carry.live.Live executor when mode == "live"."""
         self.store = store
         self.run_after_ms = run_after_min * 60_000
         self.mode = mode
+        self.live = live
         self.started = time.time()
         self._busy = threading.Lock()
         self._next_try = 0.0
+        self._watch_err = ("", 0.0)
 
     @property
     def busy(self) -> bool:
@@ -58,12 +62,20 @@ class Runner:
             state = "running"
         last = st["daily"][-1] if st["daily"] else None
         pnl_today = last["funding"] + last["basis"] + last["fees"] if last and last["day"] == _day(today) else 0.0
+        equity = self._equity(st)
         due = today + self.run_after_ms if st["last_run_day"] != _day(today) else today + DAY_MS + self.run_after_ms
         return {"id": STRATEGY_ID, "name": STRATEGY_NAME, "mode": self.mode, "state": state, "desired": st["desired"],
                 "open_positions": len(st["held"]), "book": sorted(st["held"]),
-                "capital0": st["capital0"], "equity": st["capital"], "pnl_total": st["capital"] - st["capital0"],
+                "capital0": st["capital0"], "equity": equity, "pnl_total": equity - st["capital0"],
                 "pnl_today": pnl_today, "last_run_day": st["last_run_day"], "last_run_at": st["last_run_at"],
                 "next_run_at": _iso(max(due, now)), "last_error": st["last_error"]}
+
+    def _equity(self, st: dict) -> float:
+        """Paper books every mark into capital; live books a pair only when it closes, so add the open PnL."""
+        if self.mode == "paper":
+            return st["capital"]
+        return st["capital"] + sum(h.get("funding", 0.0) + h.get("basis", 0.0) - h.get("fees", 0.0)
+                                   for h in st["held"].values())
 
     def set_desired(self, desired: str, by=None, reason: str = "") -> dict:
         with self.store.lock:
@@ -97,9 +109,10 @@ class Runner:
             peak = max(peak, e)
             dd = max(dd, 1 - e / peak if peak > 0 else 0.0)
         days = len(daily)
-        ret = st["capital"] / st["capital0"] - 1 if st["capital0"] else 0.0
+        equity = self._equity(st)
+        ret = equity / st["capital0"] - 1 if st["capital0"] else 0.0
         annual = ((1 + ret) ** (365 / days) - 1) if days and ret > -1 else 0.0
-        return {"start": st["start_day"], "days": days, "capital0": st["capital0"], "equity": st["capital"],
+        return {"start": st["start_day"], "days": days, "capital0": st["capital0"], "equity": equity,
                 "return_pct": ret * 100, "annual_pct": annual * 100, "max_dd_pct": dd * 100,
                 "funding": sum(r["funding"] for r in daily), "basis": sum(r["basis"] for r in daily),
                 "fees": sum(r["fees"] for r in daily), **st["stats"],
@@ -116,6 +129,32 @@ class Runner:
         preview = self.store.snapshot()["last_run_day"] == _day(day)
         threading.Thread(target=self._safe_run, args=(day, preview), daemon=True).start()
         return {"ok": True, "started": True, "preview": preview}
+
+    def flatten(self, by=None) -> dict:
+        """Kill switch: pause, then close every live pair in the background."""
+        if self.live is None:
+            raise ValueError(f"flatten needs live mode (mode is {self.mode})")
+        self.set_desired("paused", by, "close all")
+
+        def run():
+            n = self.live.flatten(by)
+            self.store.event("warn", f"{STRATEGY_ID}: close all done, {n} pair(s) closed; the strategy stays paused", True)
+        threading.Thread(target=run, daemon=True).start()
+        return {"ok": True, "started": True}
+
+    def watch(self, stop: threading.Event, every_s: float = 30) -> None:
+        """Live liquidation guard loop (carry/live.py watch_once); errors are reported, not fatal."""
+        while not stop.is_set():
+            try:
+                self.live.watch_once()
+                self._watch_err = ("", 0.0)
+            except Exception as exc:                      # Binance down, bad response...: keep watching
+                msg = f"{type(exc).__name__}: {exc}"[:300]
+                last, at = self._watch_err
+                if msg != last or time.time() - at > 600:   # do not repeat the same alert every 30 s
+                    self.store.event("error", f"watchdog: {msg}", True)
+                    self._watch_err = (msg, time.time())
+            stop.wait(every_s)
 
     def _safe_run(self, day: int, preview: bool) -> None:
         try:
@@ -173,6 +212,20 @@ class Runner:
                                      f"{len(cands)} candidates, {time.time() - t0:.0f} s", True)
             return summary
 
+        if self.live is not None:                     # live: real orders, real marks
+            self.live.execute(plan)
+            row = self.live.mark(day)
+            with self.store.lock:
+                data = self.store.data
+                data["plan"] = summary
+                data["start_day"] = data["start_day"] or summary["day"]
+                data["last_run_day"], data["last_run_at"], data["last_error"] = summary["day"], now_iso(), None
+                self.store.save()
+            self.store.event("info", f"day {row['day']} (live): book {', '.join(row['book']) or 'empty'}, equity "
+                                     f"{row['equity']:.2f} USDT; top funding/8h {top}; {len(cands)} candidates, "
+                                     f"{time.time() - t0:.0f} s", True)
+            return summary
+
         rates = {}
         for s, h in st["held"].items():
             f = market.funding(s, h.get("marked", day), day)
@@ -199,7 +252,7 @@ class Runner:
             now = int(time.time() * 1000)
             day = now - now % DAY_MS
             st = self.store.snapshot()
-            if st["last_run_day"] != _day(day) and now >= day + self.run_after_ms and time.time() >= self._next_try \
+            if self.mode != "live-blocked" and st["last_run_day"] != _day(day) and now >= day + self.run_after_ms and time.time() >= self._next_try \
                     and not self.busy:
                 self._safe_run(day, False)
             stop.wait(30)

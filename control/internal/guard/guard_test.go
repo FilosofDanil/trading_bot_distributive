@@ -33,6 +33,7 @@ type fakeBinance struct {
 	upnl      map[string]float64
 	orders    map[string]int // symbol -> open order count
 	algo      map[string]int
+	income    []map[string]any
 	calls     []string
 	badSig    int
 	push      chan []byte
@@ -97,6 +98,8 @@ func (f *fakeBinance) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		out = os
+	case "GET /fapi/v1/income":
+		out = append([]map[string]any{}, f.income...)
 	case "GET /fapi/v1/openAlgoOrders":
 		var os []map[string]any
 		for s, n := range f.algo {

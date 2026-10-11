@@ -30,6 +30,12 @@ type Options struct {
 	Rules    Rules
 	Location *time.Location
 	Now      func() time.Time // for tests; nil = time.Now
+
+	// Exempt returns the symbols a live carry bot holds on this account (see carry.go); nil = none.
+	Exempt func() map[string]bool
+	// OnBlock / OnUnblock run after a block starts / ends (e.g. pause the carry bot's new entries).
+	OnBlock   func(u store.User)
+	OnUnblock func(u store.User)
 }
 
 type Guard struct {
@@ -44,6 +50,7 @@ type Guard struct {
 	enforceMu map[int64]*sync.Mutex
 	failures  map[int64]int // consecutive failed checks
 	warned    map[int64]bool
+	income    map[int64]incomeCache
 }
 
 func New(opt Options, st *store.Store, n Notifier) *Guard {
@@ -61,6 +68,7 @@ func New(opt Options, st *store.Store, n Notifier) *Guard {
 		enforceMu: map[int64]*sync.Mutex{},
 		failures:  map[int64]int{},
 		warned:    map[int64]bool{},
+		income:    map[int64]incomeCache{},
 	}
 }
 
@@ -120,18 +128,6 @@ func (g *Guard) client(u store.User) (*binance.Client, error) {
 	return c, nil
 }
 
-func snapshotOf(acc *binance.Account, now time.Time) store.Snapshot {
-	wallet := acc.TotalWalletBalance.Float()
-	upnl := acc.TotalUnrealizedProfit.Float()
-	return store.Snapshot{
-		CheckedAt:     now,
-		WalletBalance: wallet,
-		UnrealizedPnL: upnl,
-		Equity:        wallet + upnl,
-		OpenPositions: len(acc.OpenPositions()),
-	}
-}
-
 // Check is one cron run for one account: read the balance, save the snapshot, act.
 func (g *Guard) Check(ctx context.Context, chatID int64) {
 	u, ok := g.st.Get(chatID)
@@ -151,11 +147,15 @@ func (g *Guard) Check(ctx context.Context, chatID int64) {
 	g.recordSuccess(chatID, u.Lang)
 
 	now := g.opt.Now()
-	snap := snapshotOf(acc, now)
+	current := g.exempt()
+	carry := carrySet(u, current)
+	adjust := g.adjustment(ctx, c, u, carry, acc.TotalWalletBalance.Float())
+	snap := snapshotOf(acc, now, carry, adjust)
 	var d Decision
 	u, err = g.st.Update(chatID, func(u *store.User) {
 		if u.Active {
 			d = Evaluate(u, snap, now, g.opt.Rules)
+			rememberCarry(u, current)
 		}
 	})
 	if err != nil {
@@ -180,14 +180,20 @@ func (g *Guard) act(ctx context.Context, u store.User, d Decision, acc *binance.
 			g.fmtTime(u.BlockedUntil)))
 		g.reportErrors(u, res)
 		g.ensureStream(u)
+		if g.opt.OnBlock != nil {
+			g.opt.OnBlock(u)
+		}
 
 	case d.Unblock:
 		g.stopStream(u.ChatID)
 		g.notify.Notify(u.ChatID, i18n.T(lang, "unblocked", money(u.Baseline)))
+		if g.opt.OnUnblock != nil {
+			g.opt.OnUnblock(u)
+		}
 
 	case d.Blocked:
 		g.ensureStream(u) // e.g. after a restart during a block
-		if len(acc.OpenPositions()) > 0 || g.hasOpenOrders(ctx, u) {
+		if nonCarryOpen(acc, carrySet(u, g.exempt())) > 0 || g.hasOpenOrders(ctx, u) {
 			g.enforceAndReport(ctx, u)
 		}
 	}
@@ -219,17 +225,27 @@ func (g *Guard) hasOpenOrders(ctx context.Context, u store.User) bool {
 	if err != nil {
 		return false
 	}
-	if o, err := c.OpenOrders(ctx); err == nil && len(o) > 0 {
-		return true
+	carry := carrySet(u, g.exempt())
+	if o, err := c.OpenOrders(ctx); err == nil {
+		for _, x := range o {
+			if !carry[x.Symbol] {
+				return true
+			}
+		}
 	}
-	if o, err := c.OpenAlgoOrders(ctx); err == nil && len(o) > 0 {
-		return true
+	if o, err := c.OpenAlgoOrders(ctx); err == nil {
+		for _, x := range o {
+			if !carry[x.Symbol] {
+				return true
+			}
+		}
 	}
 	return false
 }
 
 // Enforce cancels all open orders (regular and conditional) and market-closes every
-// open position. Concurrent calls for the same account are serialized.
+// open position, except those of a live carry bot (carry.go). Concurrent calls for the
+// same account are serialized.
 func (g *Guard) Enforce(ctx context.Context, chatID int64) EnforceResult {
 	defer g.lockEnforce(chatID)()
 	var res EnforceResult
@@ -240,12 +256,15 @@ func (g *Guard) Enforce(ctx context.Context, chatID int64) EnforceResult {
 		return res
 	}
 
+	carry := carrySet(u, g.exempt())
 	symbols := map[string]bool{}
 	if orders, err := c.OpenOrders(ctx); err != nil {
 		res.Errors = append(res.Errors, "open orders: "+err.Error())
 	} else {
 		for _, o := range orders {
-			symbols[o.Symbol] = true
+			if !carry[o.Symbol] {
+				symbols[o.Symbol] = true
+			}
 		}
 	}
 	algoSymbols := map[string]bool{}
@@ -255,7 +274,9 @@ func (g *Guard) Enforce(ctx context.Context, chatID int64) EnforceResult {
 		}
 	} else {
 		for _, o := range orders {
-			algoSymbols[o.Symbol] = true
+			if !carry[o.Symbol] {
+				algoSymbols[o.Symbol] = true
+			}
 		}
 	}
 	cancelled := map[string]bool{}
@@ -280,7 +301,12 @@ func (g *Guard) Enforce(ctx context.Context, chatID int64) EnforceResult {
 		res.Errors = append(res.Errors, "account: "+err.Error())
 		return res
 	}
-	open := acc.OpenPositions()
+	var open []binance.Position
+	for _, p := range acc.OpenPositions() {
+		if !carry[p.Symbol] {
+			open = append(open, p)
+		}
+	}
 	if len(open) == 0 {
 		return res
 	}
@@ -465,7 +491,8 @@ func (g *Guard) Activate(ctx context.Context, chatID int64, key, secret string) 
 		return res, err
 	}
 	now := g.opt.Now()
-	snap := snapshotOf(acc, now)
+	current := g.exempt()
+	snap := snapshotOf(acc, now, current, 0) // the next check adds this window's transfers / carry income
 	hash := KeyHash(key)
 	res.User, err = g.st.Update(chatID, func(u *store.User) {
 		keep := u.KeyHash == hash && u.Baseline > 0 && now.Before(u.PeriodStart.Add(g.opt.Rules.Period))
@@ -478,6 +505,7 @@ func (g *Guard) Activate(ctx context.Context, chatID int64, key, secret string) 
 		}
 		snap.LossAmount, snap.LossPct = Loss(u.Baseline, snap.Equity)
 		u.Last = snap
+		rememberCarry(u, current)
 	})
 	if err != nil {
 		return res, err

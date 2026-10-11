@@ -3,6 +3,7 @@ package bot
 import (
 	"context"
 	"strings"
+	"time"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 
@@ -15,10 +16,11 @@ import (
 // chat's current view (main menu, bot list, one bot's controls, language choice).
 
 const (
-	viewMain  = ""
-	viewBots  = "bots"
-	viewLang  = "lang"
-	viewStrat = "s:" // + strategy id
+	viewMain    = ""
+	viewBots    = "bots"
+	viewLang    = "lang"
+	viewStrat   = "s:" // + strategy id
+	viewConfirm = "c:" // + strategy id: "close all" asked, waiting for the confirmation
 
 	botPrefix = "🤖 "  // bot list button: "🤖 <strategy id>"
 	idSep     = " · " // strategy control button: "<label> · <strategy id>"
@@ -35,6 +37,35 @@ var strategyActions = []struct{ key, action string }{
 	{"rb_plan", "plan"},
 	{"rb_pos", "positions"},
 	{"rb_report", "report"},
+	{"rb_flatten", "flatten"},
+	{"rb_flatten_yes", "flatten_yes"}, // shown only on the confirmation keyboard
+}
+
+// flattenTTL is how long a "close all" request waits for its confirmation.
+const flattenTTL = 2 * time.Minute
+
+type flattenAsk struct {
+	id string
+	at time.Time
+}
+
+func (b *Bot) askFlatten(chatID int64, id string) {
+	b.viewMu.Lock()
+	if b.flatten == nil {
+		b.flatten = map[int64]flattenAsk{}
+	}
+	b.flatten[chatID] = flattenAsk{id, time.Now()}
+	b.viewMu.Unlock()
+	b.setView(chatID, viewConfirm+id)
+}
+
+// takeFlatten consumes a pending request for id; false = none, another bot, or expired.
+func (b *Bot) takeFlatten(chatID int64, id string) bool {
+	b.viewMu.Lock()
+	defer b.viewMu.Unlock()
+	a, ok := b.flatten[chatID]
+	delete(b.flatten, chatID)
+	return ok && a.id == id && time.Since(a.at) <= flattenTTL
 }
 
 func (b *Bot) setView(chatID int64, v string) {
@@ -66,6 +97,10 @@ func (b *Bot) keyboardFor(chatID int64, lang string) tgbotapi.ReplyKeyboardMarku
 		return langKeyboard(lang)
 	case strings.HasPrefix(v, viewStrat):
 		return strategyKeyboard(lang, strings.TrimPrefix(v, viewStrat))
+	case strings.HasPrefix(v, viewConfirm):
+		id := strings.TrimPrefix(v, viewConfirm)
+		return replyKeyboard(buttons(strategyButton(lang, "rb_flatten_yes", id)),
+			buttons(strategyButton(lang, "rb_plan", id), i18n.T(lang, "btn_menu")))
 	}
 	return mainKeyboard(lang)
 }
@@ -126,6 +161,7 @@ func strategyKeyboard(lang, id string) tgbotapi.ReplyKeyboardMarkup {
 		buttons(strategyButton(lang, "rb_pause", id), strategyButton(lang, "rb_resume", id)),
 		buttons(strategyButton(lang, "rb_run", id), strategyButton(lang, "rb_plan", id)),
 		buttons(strategyButton(lang, "rb_pos", id), strategyButton(lang, "rb_report", id)),
+		buttons(strategyButton(lang, "rb_flatten", id)),
 		buttons(i18n.T(lang, "btn_bots"), i18n.T(lang, "btn_menu")),
 	)
 }
