@@ -135,6 +135,46 @@ def live(tmp_path):
     return Live(ex, store, Protect()), ex, store
 
 
+@pytest.fixture()
+def no_transfer(tmp_path):
+    """A key without Universal Transfer: the owner funded both wallets."""
+    ex = FakeExchange(usdt=110.0)
+    ex.fut = 250.0
+    store = Store(tmp_path / "live.json", 300.0)
+    return Live(ex, store, Protect(), transfers=False), ex, store
+
+
+def test_no_transfer_open_uses_each_wallet(no_transfer):
+    lv, ex, store = no_transfer
+    h = lv.open_pair(SYM, 100.0, "test")
+    assert h is not None and "transfer" not in ex.calls
+    assert ex.pos[SYM].margin == pytest.approx(strategy.P["buffer"] * 100.0, rel=0.02)     # 2N from futures
+    assert ex.spot["USDT"] < 10 and ex.fut < 50                                            # spot leg + margin
+    assert ex.stop_orders[SYM]
+
+
+def test_no_transfer_refuses_without_futures_margin(no_transfer):
+    lv, ex, store = no_transfer
+    ex.fut = 150.0                                          # 2N = 200 needed
+    assert lv.open_pair(SYM, 100.0, "test") is None
+    assert "perp_order" not in ex.calls and "transfer" not in ex.calls
+    assert any("margin on futures" in e["msg"] for e in store.snapshot()["events"])
+
+
+def test_no_transfer_close_keeps_margin_on_futures_and_topup_uses_futures(no_transfer):
+    lv, ex, store = no_transfer
+    h = lv.open_pair(SYM, 100.0, "test")
+    ex.fut += 100.0                                         # spare margin on futures
+    ex.pos[SYM].margin = 160.0
+    ex.px[SYM] = [1.75, 1.75]                               # liquidation ~49 % away -> top-up
+    lv.watch_once()
+    assert ex.pos[SYM].margin > 160.0 and "transfer" not in ex.calls
+    fut_before = ex.fut
+    rec = lv.close_pair(SYM, store.snapshot()["held"][SYM], "test close")
+    assert rec is not None and "transfer" not in ex.calls
+    assert ex.fut > fut_before + 100                        # the margin came back to the futures wallet
+
+
 def test_open_pair_hedges_margins_and_places_the_stop(live):
     lv, ex, store = live
     h = lv.open_pair(SYM, 100.0, "test")

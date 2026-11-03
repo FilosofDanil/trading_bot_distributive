@@ -17,6 +17,11 @@ Liquidation protection, checked every WATCH_EVERY_S seconds (watch_once), for ea
   L3 the exchange stop is missing -> place it again (or close the pair if the price is already past it)
   L4 a leg is gone (stop fired, liquidated, sold by hand) -> close the other leg, 7-day cooldown
 Every action is an event with notify=true, so control forwards it to Telegram.
+
+Without the Universal Transfer permission (`transfers=False`) nothing is moved between the wallets: the spot leg
+is paid from spot USDT, the perp margin from the futures wallet, a closed pair's margin stays on futures for the
+next one, and L1 top-ups come from the futures wallet only. The owner keeps about 1/3 of the capital on spot and
+2/3 on futures.
 """
 from __future__ import annotations
 
@@ -120,10 +125,11 @@ def _now_ms() -> int:
 
 
 class Live:
-    def __init__(self, ex: Exchange, store: Store, protect: Protect | None = None):
+    def __init__(self, ex: Exchange, store: Store, protect: Protect | None = None, transfers: bool = True):
         self.ex = ex
         self.store = store
         self.p = protect or Protect()
+        self.transfers = transfers             # False: the key cannot move USDT between spot and futures
         self.lock = threading.RLock()          # serialises the daily cycle, the watchdog and flatten
         self._topup_at: dict[str, float] = {}
 
@@ -168,26 +174,33 @@ class Live:
         q_gross = ceil_step(q / (1 - SPOT_FEE), ss)
         margin = strategy.P["buffer"] * q * perp_px
         moved = round(margin * 1.01, 2)
-        need = q_gross * spot_px * 1.003 + moved
+        need = q_gross * spot_px * 1.003 + (moved if self.transfers else 0.0)
         free = self.ex.spot_free("USDT")
         if free < need:
             self._event("warn", f"{sym}: needs {need:.2f} USDT on spot, {free:.2f} free - not opened")
             return None
+        if not self.transfers and self.ex.futures_available() < moved:
+            self._event("warn", f"{sym}: needs {moved:.2f} USDT margin on futures, "
+                                f"{self.ex.futures_available():.2f} available (no transfers) - not opened")
+            return None
 
-        self.ex.transfer(moved, to_futures=True)
+        if self.transfers:
+            self.ex.transfer(moved, to_futures=True)
         try:
             self.ex.prepare_short(sym)
             perp = self.ex.perp_order(sym, "SELL", q, reduce=False)
         except Exception as exc:                          # noqa: BLE001
-            self._try(f"{sym}: return {moved:.2f} USDT to spot", lambda: self.ex.transfer(moved, to_futures=False))
+            if self.transfers:
+                self._try(f"{sym}: return {moved:.2f} USDT to spot", lambda: self.ex.transfer(moved, to_futures=False))
             self._event("error", f"{sym}: perp short failed ({type(exc).__name__}: {exc}), pair not opened")
             return None
         try:
             spot = self.ex.spot_order(sym, "BUY", q_gross)
         except Exception as exc:                          # noqa: BLE001
             self._try(f"{sym}: unwind the perp short", lambda: self.ex.perp_order(sym, "BUY", perp.qty, reduce=True))
-            self._try(f"{sym}: return the margin to spot",
-                      lambda: self.ex.transfer(min(moved, self.ex.futures_available()), to_futures=False))
+            if self.transfers:
+                self._try(f"{sym}: return the margin to spot",
+                          lambda: self.ex.transfer(min(moved, self.ex.futures_available()), to_futures=False))
             self._event("error", f"{sym}: spot buy failed ({type(exc).__name__}: {exc}), the short was unwound")
             return None
 
@@ -235,7 +248,7 @@ class Live:
         exit_px = perp_fill.price if perp_fill else perp_px
         perp_pnl = (h["ref"] - exit_px) * h["q"] if perp_fill else 0.0
         back = min(self.ex.futures_available(), max(0.0, h["margin"] + perp_pnl))
-        if back >= 1:
+        if back >= 1 and self.transfers:                  # without transfers the margin stays for the next pair
             self._try(f"{sym}: return {back:.2f} USDT to spot", lambda: self.ex.transfer(round(back, 2), to_futures=False))
         funding = self._safe_funding(sym, h["opened"])
         fees = h.get("fees", 0.0) + (perp_fill.fee_usdt if perp_fill else 0.0) + (spot_fill.fee_usdt if spot_fill else 0.0)
@@ -266,10 +279,14 @@ class Live:
         if new_n > h["n"]:
             dq_gross = ceil_step(dq / (1 - SPOT_FEE), ss)
             add = strategy.P["buffer"] * dq * perp_px
-            if self.ex.spot_free("USDT") < dq_gross * spot_px * 1.003 + add:
+            if self.ex.spot_free("USDT") < dq_gross * spot_px * 1.003 + (add if self.transfers else 0.0):
                 self._event("warn", f"{sym}: not enough spot USDT to grow the pair, kept at {h['n']:.2f}")
                 return h
-            self.ex.transfer(round(add, 2), to_futures=True)
+            if not self.transfers and self.ex.futures_available() < add:
+                self._event("warn", f"{sym}: not enough futures USDT for the margin to grow the pair, kept at {h['n']:.2f}")
+                return h
+            if self.transfers:
+                self.ex.transfer(round(add, 2), to_futures=True)
             perp = self.ex.perp_order(sym, "SELL", dq, reduce=False)
             try:
                 spot = self.ex.spot_order(sym, "BUY", dq_gross)
@@ -403,7 +420,7 @@ class Live:
     def _topup(self, s: str, h: dict, p: Perp, dist: float) -> None:
         want = round(0.5 * h["q"] * p.mark, 2)           # half the current notional
         avail = self.ex.futures_available()
-        if avail < want:
+        if avail < want and self.transfers:
             spot_usdt = self.ex.spot_free("USDT")
             move = round(min(want - avail, spot_usdt), 2)
             if move >= 1 and self._try(f"{s}: move {move:.2f} USDT to futures", lambda: self.ex.transfer(move, True)):

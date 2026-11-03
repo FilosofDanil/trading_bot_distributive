@@ -40,6 +40,11 @@ def _runner() -> Runner:
     strategy.P["k"] = int(os.environ.get("MAX_COINS", "3"))
     # not STATE_FILE: the image sets it to the paper record
     store = Store(os.environ.get("LIVE_STATE_FILE", "/data/carry_live_state.json"), capital)
+    with store.lock:                                      # nothing traded yet: CARRY_CAPITAL may still change
+        d = store.data
+        if not d["held"] and not d["closed"] and not d["daily"] and d["capital0"] != capital:
+            d["capital0"] = d["capital"] = capital
+            store.save()
     from .keys import from_control
     why = from_control()
     if why:
@@ -50,11 +55,17 @@ def _runner() -> Runner:
         missing = ex.check_permissions()
     except Exception as exc:                              # noqa: BLE001
         missing = [f"cannot read the key's permissions ({type(exc).__name__}: {exc})"]
+    transfers = "universal transfer" not in missing       # optional: without it each wallet pays its own leg
+    missing = [m for m in missing if m != "universal transfer"]
     if missing:
         store.event("error", f"{STRATEGY_ID}: live trading is OFF - the Binance key lacks: {', '.join(missing)}. "
                              f"{_permission_hint(missing)}", True)
         return Runner(store, run_after, "live-blocked")
-    live = Live(ex, store, Protect.from_env())
+    if not transfers:
+        store.event("info", f"{STRATEGY_ID}: the key has no Universal Transfer - no USDT is moved between wallets. "
+                            f"Keep about {capital / 3:.0f} USDT on spot (spot legs) and {capital * 2 / 3:.0f} USDT "
+                            f"on futures (isolated margin 2x each short); margin top-ups come from futures only.", True)
+    live = Live(ex, store, Protect.from_env(), transfers=transfers)
     live.reconcile()
     return Runner(store, run_after, "live", live)
 
@@ -64,8 +75,6 @@ def _permission_hint(missing: list[str]) -> str:
     if any(m in ("spot trading", "futures") for m in missing):
         return ("An HMAC key without an IP whitelist is read-only; use a self-generated Ed25519 key "
                 "(BINANCE_PRIVATE_KEY) or an IP-restricted key on a static IP.")
-    if missing == ["universal transfer"]:
-        return "Enable 'Permits Universal Transfer' on the key in Binance API Management, then restart the runner."
     return "Fix the key's restrictions in Binance API Management, then restart the runner."
 
 

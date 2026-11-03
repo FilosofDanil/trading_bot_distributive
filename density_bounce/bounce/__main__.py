@@ -42,6 +42,8 @@ def _runner() -> Runner:
     from .live import LiveBroker, Rest, check
     # not STATE_FILE: the image sets it to the paper record
     store = Store(os.environ.get("LIVE_STATE_FILE", "/data/bounce_live_state.json"), capital)
+    if store.data["totals"]["n"] == 0 and not store.data["slots"] and store.data["capital0"] != capital:
+        store.set("capital0", capital)                   # nothing traded yet: CAPITAL may still change
     why = from_control()
     if why:
         # not notify: the reason is the strategy's last_error, which control already alerts once

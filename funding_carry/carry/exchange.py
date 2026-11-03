@@ -4,7 +4,7 @@ Keys come from the environment only: BINANCE_API_KEY plus either BINANCE_API_SEC
 BINANCE_PRIVATE_KEY (an Ed25519 private key in PEM, for a self-generated key). Binance gives an HMAC key without
 an IP whitelist read permission only, so on a host without a static IP the key has to be a self-generated one;
 `check_permissions` reads GET /sapi/v1/account/apiRestrictions and the runner refuses to trade without spot
-trading, futures and universal transfer.
+trading and futures; without universal transfer it trades with each wallet's own USDT (carry/live.py).
 
 Notes from the API (2025-12): conditional orders (STOP_MARKET) live in the Algo Service
 (POST /fapi/v1/algoOrder; /fapi/v1/order answers -4120); the margin type cannot change while a position or an
