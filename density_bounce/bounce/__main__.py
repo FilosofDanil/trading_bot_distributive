@@ -44,7 +44,8 @@ def _runner() -> Runner:
     store = Store(os.environ.get("LIVE_STATE_FILE", "/data/bounce_live_state.json"), capital)
     why = from_control()
     if why:
-        store.event("error", f"{STRATEGY_ID}: live trading is OFF - no Binance key from control: {why}", True)
+        # not notify: the reason is the strategy's last_error, which control already alerts once
+        store.event("error", f"{STRATEGY_ID}: live trading is OFF - no Binance key from control: {why}")
         return Runner(store, "live-blocked", blocked=why, notify_trades=notify)
     rest = Rest.from_env()
     try:
@@ -53,7 +54,7 @@ def _runner() -> Runner:
         problems = [f"account check failed ({type(exc).__name__}: {exc})"]
     rest.new_http()                                      # the check's client belonged to a closed event loop
     if problems:
-        store.event("error", f"{STRATEGY_ID}: live trading is OFF - {'; '.join(problems)}", True)
+        store.event("error", f"{STRATEGY_ID}: live trading is OFF - {'; '.join(problems)}")
         return Runner(store, "live-blocked", blocked="; ".join(problems), notify_trades=notify)
     return Runner(store, "live", LiveBroker(rest), notify_trades=notify)
 

@@ -52,12 +52,21 @@ def _runner() -> Runner:
         missing = [f"cannot read the key's permissions ({type(exc).__name__}: {exc})"]
     if missing:
         store.event("error", f"{STRATEGY_ID}: live trading is OFF - the Binance key lacks: {', '.join(missing)}. "
-                             f"An HMAC key without an IP whitelist is read-only; use a self-generated Ed25519 key "
-                             f"(BINANCE_PRIVATE_KEY) or an IP-restricted key on a static IP.", True)
+                             f"{_permission_hint(missing)}", True)
         return Runner(store, run_after, "live-blocked")
     live = Live(ex, store, Protect.from_env())
     live.reconcile()
     return Runner(store, run_after, "live", live)
+
+
+def _permission_hint(missing: list[str]) -> str:
+    """What to do about the missing permissions (the read-only HMAC note only when trading itself is off)."""
+    if any(m in ("spot trading", "futures") for m in missing):
+        return ("An HMAC key without an IP whitelist is read-only; use a self-generated Ed25519 key "
+                "(BINANCE_PRIVATE_KEY) or an IP-restricted key on a static IP.")
+    if missing == ["universal transfer"]:
+        return "Enable 'Permits Universal Transfer' on the key in Binance API Management, then restart the runner."
+    return "Fix the key's restrictions in Binance API Management, then restart the runner."
 
 
 def serve() -> None:

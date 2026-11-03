@@ -114,5 +114,10 @@ win 10.9 %; 604 "density_gone" exits = 0 % win -> the owner's rules drop that ex
       "API on [::]:8080", watching 16; control "runners: 2 configured", TCP to 2 runners :8080 every 30 s
 - [x] Owner decision 2026-11-03: BOTH bots live, 500 USDT each; bounce 500 USDT per trade, x2, max 2, day -15,
       total -75 (account has >= 1000 USDT). Fix 03a625e: live check needs max_open x notional / leverage margin.
-- [ ] Owner runs Desktop/Railway/enable_live.ps1 (Ed25519 keygen -> Binance -> hidden API key -> read-only check
-      -> variables + redeploy); then Claude verifies both deploys + "LIVE" in the logs
+- [x] Owner: key from control's store instead of a new one -> f917c31 control keyserver (KEY_SERVER_PORT=8090,
+      X-Control-Token) + runners KEY_FROM_CONTROL; control log "keyserver: serving", 1 active account
+- [x] runners MODE=live (carry 500 / 3 coins; bounce 500 per trade x2, max 2, day -15, total -75) -> SUCCESS, both
+      live-blocked, no order: carry key lacks Universal Transfer; bounce futures available 365.17 < 500
+- [x] 12225f6: live used the paper STATE_FILE (Dockerfile ENV) -> LIVE_STATE_FILE /data/*_live_state.json
+- [ ] Owner: enable Permits Universal Transfer on the key; futures available >= 500 (or bounce MAX_OPEN=1);
+      then Claude redeploys both runners and checks "mode live"
