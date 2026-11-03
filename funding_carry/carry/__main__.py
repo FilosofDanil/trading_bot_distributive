@@ -3,7 +3,8 @@ python -m carry once [--day YYYY-MM-DD] [--preview]   one cycle now against STAT
 
 Environment: CONTROL_TOKEN (required to serve /v1/*), PORT (8080), STATE_FILE (/data/carry_state.json),
 CARRY_CAPITAL (capital in USDT, 500; used only when the state file is created), RUN_AFTER_MIN (5),
-MODE (paper | live). Live also reads BINANCE_API_KEY + BINANCE_API_SECRET or BINANCE_PRIVATE_KEY (Ed25519 PEM),
+MODE (paper | live). Live also reads BINANCE_API_KEY + BINANCE_API_SECRET or BINANCE_PRIVATE_KEY (Ed25519 PEM)
+or KEY_FROM_CONTROL (http://control.railway.internal:8090: the key stored in control with /start, carry/keys.py),
 MAX_COINS (3), STATE_FILE (/data/carry_live_state.json), LIQ_TOPUP_DIST / LIQ_CLOSE_DIST / LIQ_CLOSE_RISE /
 LIQ_STOP_RISE (carry/live.py Protect).
 """
@@ -38,6 +39,11 @@ def _runner() -> Runner:
     from .live import Live, Protect
     strategy.P["k"] = int(os.environ.get("MAX_COINS", "3"))
     store = Store(os.environ.get("STATE_FILE", "/data/carry_live_state.json"), capital)
+    from .keys import from_control
+    why = from_control()
+    if why:
+        store.event("error", f"{STRATEGY_ID}: live trading is OFF - no Binance key from control: {why}", True)
+        return Runner(store, run_after, "live-blocked")
     ex = Binance.from_env()
     try:
         missing = ex.check_permissions()

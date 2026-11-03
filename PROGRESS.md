@@ -107,5 +107,12 @@ win 10.9 %; 604 "density_gone" exits = 0 % win -> the owner's rules drop that ex
 - [x] control: generic `text` for plan / positions / report (carry unchanged); gofmt / vet / test pass
 - [x] docs/runner_api.md + README round 4; local paper run against live Binance (16 books synced, first trade
       HOTUSDT short -> take +2.03R); container: control e2e test (Go client <-> runner) PASS, RSS 88 MB
-- [ ] Owner: commit + push (CI), create the density-bounce service (density_bounce/README.md), extend RUNNERS
-- [ ] Owner: >= 200 paper trades before any judgement; live only after explicit approval + Ed25519 key
+- [x] commit e3413b3 + push; Railway CLI (owner's goal 2026-11-03): folder re-linked (repo moved to Desktop/Railway),
+      service density-bounce 4c0b679e (root /density_bounce, EU West, volume /data, healthcheck /healthz),
+      CONTROL_TOKEN=${{control.CONTROL_TOKEN}} (reference), control RUNNERS += bounce=...:8080, source -> GitHub main
+- [x] deployments density-bounce dfd5fe32 + control 5f353e59 (e3413b3) SUCCESS 2026-11-03 14:31 UTC; bounce log
+      "API on [::]:8080", watching 16; control "runners: 2 configured", TCP to 2 runners :8080 every 30 s
+- [x] Owner decision 2026-11-03: BOTH bots live, 500 USDT each; bounce 500 USDT per trade, x2, max 2, day -15,
+      total -75 (account has >= 1000 USDT). Fix 03a625e: live check needs max_open x notional / leverage margin.
+- [ ] Owner runs Desktop/Railway/enable_live.ps1 (Ed25519 keygen -> Binance -> hidden API key -> read-only check
+      -> variables + redeploy); then Claude verifies both deploys + "LIVE" in the logs

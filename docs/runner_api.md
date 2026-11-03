@@ -99,6 +99,15 @@ cover only the held pairs (no new ones) and `would_open` lists the pairs a resum
 `<runner>.<strategy>`, for example `funding.carry`. Control lists the runners in
 `RUNNERS=funding=http://funding-carry.railway.internal:8080[,name=url...]`.
 
+## The Binance key from control (opt-in)
+
+With `KEY_SERVER_PORT=8090` on control, control serves the key the owner stored with `/start`:
+`GET http://control.railway.internal:8090/v1/binance-key` + `X-Control-Token` → `{"chat_id", "api_key", "api_secret"}`
+(401 wrong token, 404 no stored key, 409 more than one account). A live runner with
+`KEY_FROM_CONTROL=http://control.railway.internal:8090` reads it at start into memory (`keys.py`); if it cannot,
+it starts `live-blocked` and says why. A key set on the runner itself (`BINANCE_API_KEY`) wins. A new key entered
+with `/start` reaches the runners on their next restart.
+
 ## Runners without a daily cycle (`bounce.density`, density_bounce/)
 
 A scalp runner fills the same endpoints with what fits, and adds its own view as plain text:

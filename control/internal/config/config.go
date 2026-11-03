@@ -46,6 +46,9 @@ type Config struct {
 	Runners            []Runner
 	ControlToken       string // sent as X-Control-Token
 	RunnerPollInterval time.Duration
+
+	// KeyServerPort > 0 serves the stored Binance key to the runners (internal/keyserver); 0 = off.
+	KeyServerPort int
 }
 
 // Runner is one trading-bot service.
@@ -159,6 +162,14 @@ func Load(envFile string) (*Config, error) {
 	c.ControlToken = strings.TrimSpace(os.Getenv("CONTROL_TOKEN"))
 	if len(c.Runners) > 0 && c.ControlToken == "" {
 		return nil, errors.New("CONTROL_TOKEN is required when RUNNERS is set")
+	}
+	if v := strings.TrimSpace(os.Getenv("KEY_SERVER_PORT")); v != "" {
+		if c.KeyServerPort, err = strconv.Atoi(v); err != nil || c.KeyServerPort < 1 || c.KeyServerPort > 65535 {
+			return nil, errors.New("KEY_SERVER_PORT must be a port number")
+		}
+		if c.ControlToken == "" {
+			return nil, errors.New("KEY_SERVER_PORT needs CONTROL_TOKEN")
+		}
 	}
 	return c, nil
 }

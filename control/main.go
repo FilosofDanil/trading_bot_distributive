@@ -18,6 +18,7 @@ import (
 	"control/internal/bot"
 	"control/internal/config"
 	"control/internal/guard"
+	"control/internal/keyserver"
 	"control/internal/runners"
 	"control/internal/store"
 )
@@ -97,6 +98,14 @@ func main() {
 		b.SetRunners(reg)
 		go reg.Run(ctx)
 		log.Printf("runners: %d configured, poll every %s", len(clients), cfg.RunnerPollInterval)
+	}
+	if cfg.KeyServerPort > 0 {
+		go func() {
+			if err := keyserver.Serve(ctx, cfg.KeyServerPort, keyserver.Handler(st, cfg.ControlToken)); err != nil {
+				log.Printf("keyserver: %v", err)
+			}
+		}()
+		log.Printf("keyserver: serving the stored Binance key to runners on [::]:%d (X-Control-Token)", cfg.KeyServerPort)
 	}
 	go g.Run(ctx)
 	log.Printf("control: checking %d active account(s) every %s (alert %.0f%%, block %.0f%% for %s)",
