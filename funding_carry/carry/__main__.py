@@ -5,7 +5,7 @@ Environment: CONTROL_TOKEN (required to serve /v1/*), PORT (8080), STATE_FILE (/
 CARRY_CAPITAL (capital in USDT, 500; used only when the state file is created), RUN_AFTER_MIN (5),
 MODE (paper | live). Live also reads BINANCE_API_KEY + BINANCE_API_SECRET or BINANCE_PRIVATE_KEY (Ed25519 PEM)
 or KEY_FROM_CONTROL (http://control.railway.internal:8090: the key stored in control with /start, carry/keys.py),
-MAX_COINS (3), STATE_FILE (/data/carry_live_state.json), LIQ_TOPUP_DIST / LIQ_CLOSE_DIST / LIQ_CLOSE_RISE /
+MAX_COINS (3), LIVE_STATE_FILE (/data/carry_live_state.json; STATE_FILE is the paper record), LIQ_TOPUP_DIST / LIQ_CLOSE_DIST / LIQ_CLOSE_RISE /
 LIQ_STOP_RISE (carry/live.py Protect).
 """
 from __future__ import annotations
@@ -38,7 +38,8 @@ def _runner() -> Runner:
     from .exchange import Binance
     from .live import Live, Protect
     strategy.P["k"] = int(os.environ.get("MAX_COINS", "3"))
-    store = Store(os.environ.get("STATE_FILE", "/data/carry_live_state.json"), capital)
+    # not STATE_FILE: the image sets it to the paper record
+    store = Store(os.environ.get("LIVE_STATE_FILE", "/data/carry_live_state.json"), capital)
     from .keys import from_control
     why = from_control()
     if why:

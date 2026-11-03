@@ -2,7 +2,7 @@
 python -m bounce check         live mode: read-only check of the key / account, sends no order
 
 Environment: CONTROL_TOKEN (required to serve /v1/*), PORT (8080), MODE (paper | live),
-STATE_FILE (/data/bounce_state.json; live: /data/bounce_live_state.json), CAPITAL (100; PAPER_CAPITAL also works:
+STATE_FILE (/data/bounce_state.json, paper), LIVE_STATE_FILE (/data/bounce_live_state.json), CAPITAL (100; PAPER_CAPITAL also works:
 the record's starting equity, used only when the state file is created), NOTIFY_TRADES (closes | all | none: which trade events go to Telegram), WATCH (16 symbols),
 NOTIONAL (10 USDT per trade), LEVERAGE (2), MAX_OPEN (2), DAY_LOSS (1), TOTAL_LOSS (5), MAX_CONSEC_LOSSES (6),
 MAX_TRADES_DAY (60), PARAMS (JSON object over bounce/setup.py P, e.g. {"take_frac": 0.5, "stop_buf": 0.002}).
@@ -40,7 +40,8 @@ def _runner() -> Runner:
     # live: its own state file (the paper record stays as it was)
     from .keys import from_control
     from .live import LiveBroker, Rest, check
-    store = Store(os.environ.get("STATE_FILE", "/data/bounce_live_state.json"), capital)
+    # not STATE_FILE: the image sets it to the paper record
+    store = Store(os.environ.get("LIVE_STATE_FILE", "/data/bounce_live_state.json"), capital)
     why = from_control()
     if why:
         store.event("error", f"{STRATEGY_ID}: live trading is OFF - no Binance key from control: {why}", True)
