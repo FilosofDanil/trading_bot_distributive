@@ -1,10 +1,32 @@
 package bot
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 	"unicode/utf8"
+
+	"control/internal/runners"
 )
+
+// A scalp runner (density_bounce) sends its own lines in `text`; they replace the carry layout, escaped.
+func TestTextReport(t *testing.T) {
+	var r runners.Report
+	raw := `{"start":"2026-11-03","days":1,"capital0":100,"equity":100.5,"return_pct":0.5,"max_dd_pct":0.1,
+		"text":["trades 3 · win 67%","  take  n 2 <x>"]}`
+	if err := json.Unmarshal([]byte(raw), &r); err != nil {
+		t.Fatal(err)
+	}
+	out := textReport("en", "bounce.density", r, "▁█")
+	for _, want := range []string{"bounce.density", "100.50", "+0.50%", "trades 3 · win 67%", "&lt;x&gt;", "<code>▁█</code>"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing %q in %q", want, out)
+		}
+	}
+	if strings.Contains(out, "Funding") || strings.Contains(out, "Pairs") {
+		t.Errorf("carry fields must not appear: %q", out)
+	}
+}
 
 func TestSpark(t *testing.T) {
 	if got := spark([]float64{1, 2, 3, 4, 5, 6, 7, 8}, 30); got != "▁▂▃▄▅▆▇█" {

@@ -93,6 +93,18 @@ railway service redeploy --service control --yes
 Check: `railway logs --service control --network` shows TCP to `<funding-carry ip>:8080 OK` every 30 s.
 In Git Bash, set `MSYS_NO_PATHCONV=1` before any argument that starts with `/`.
 
+## Round 4 — `density_bounce` runner (prototype, paper)
+
+`density_bounce/` is the second trading bot: the bounce off an order-book density. Enter on a sharp approach to the
+density, **stop behind the density, take at the middle of the previous move**. It keeps live local order books of
+16 liquid alts over Binance websockets, runs in **paper mode** (simulated fills, no orders) and has a gated live mode
+(exchange-side stop on every position). Rules, risk limits, variables and the Railway steps:
+[`density_bounce/README.md`](density_bounce/README.md).
+
+To add it to the running project: create the `density-bounce` service (root `/density_bounce`, volume `/data`,
+`CONTROL_TOKEN`), then extend control's `RUNNERS` with `bounce=http://density-bounce.railway.internal:8080`.
+Control renders its `/plan`, `/positions`, `/report` from the runner's `text` lines (carry is unchanged).
+
 ## What the system does
 
 1. **Monitors the account**: balance, equity, daily PnL, drawdown from peak. Sends alerts to Telegram.

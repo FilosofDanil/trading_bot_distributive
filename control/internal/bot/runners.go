@@ -240,6 +240,10 @@ func (b *Bot) cmdPlan(ctx context.Context, chatID int64, lang, query string) {
 		b.sendErr(chatID, lang, id, err)
 		return
 	}
+	if len(p.Text) > 0 {
+		b.send(chatID, lang, fitPre(i18n.T(lang, "plan_text_head", guard.Escape(id), guard.Escape(p.Day)), p.Text, ""))
+		return
+	}
 	head := i18n.T(lang, "plan_head", guard.Escape(id), guard.Escape(p.Day), yn(lang, p.Accepted), yn(lang, p.Preview),
 		yn(lang, p.Paused), guard.Money(p.Equity), guard.Money(p.Idle), list(p.Book))
 	head += "\n" + i18n.T(lang, "plan_lists", list(p.Open), list(p.Close), resizeList(p.Resize), list(p.PairStopped),
@@ -295,6 +299,17 @@ func (b *Bot) cmdPositions(ctx context.Context, chatID int64, lang, query string
 		b.send(chatID, lang, i18n.T(lang, "pos_none", guard.Escape(id)))
 		return
 	}
+	head := i18n.T(lang, "pos_head", guard.Escape(id), len(ps))
+	if ps[0].Text != "" {
+		var lines []string
+		var total float64
+		for _, p := range ps {
+			total += p.Pnl
+			lines = append(lines, p.Text)
+		}
+		b.send(chatID, lang, fitPre(head, lines, "\n"+i18n.T(lang, "pos_total", guard.Signed(total))))
+		return
+	}
 	var cells [][]string
 	var total float64
 	for _, p := range ps {
@@ -302,7 +317,6 @@ func (b *Bot) cmdPositions(ctx context.Context, chatID int64, lang, query string
 		cells = append(cells, []string{p.Symbol, guard.Money(p.N), strconv.Itoa(p.Days), guard.Signed(p.Funding),
 			guard.Signed(p.Basis), guard.Signed(p.Fees), guard.Signed(p.Pnl)})
 	}
-	head := i18n.T(lang, "pos_head", guard.Escape(id), len(ps))
 	tail := i18n.T(lang, "pos_total", guard.Signed(total))
 	b.send(chatID, lang, fitPre(head, table(strings.Split(i18n.T(lang, "hdr_positions"), "|"), cells), "\n"+tail))
 }
@@ -322,10 +336,25 @@ func (b *Bot) cmdReport(ctx context.Context, chatID int64, lang, query string) {
 	for _, p := range r.Curve {
 		curve = append(curve, p.Equity)
 	}
+	if len(r.Text) > 0 {
+		b.send(chatID, lang, textReport(lang, id, r, spark(curve, 30)))
+		return
+	}
 	b.send(chatID, lang, i18n.T(lang, "report", guard.Escape(id), guard.Escape(r.Start), r.Days, r.ActiveDays,
 		guard.Money(r.Capital0), guard.Money(r.Equity), fmt.Sprintf("%+.2f", r.ReturnPct), fmt.Sprintf("%.2f", r.AnnualPct),
 		fmt.Sprintf("%.2f", r.MaxDDPct), guard.Signed(r.Funding), guard.Signed(r.Basis), guard.Signed(r.Fees),
 		r.PairsOpened, r.PairsClosed, r.PairStops, spark(curve, 30)))
+}
+
+// textReport renders a report whose runner sends its own lines (scalp runners): equity header + the lines.
+func textReport(lang, id string, r runners.Report, curve string) string {
+	head := i18n.T(lang, "report_text_head", guard.Escape(id), guard.Escape(r.Start), r.Days,
+		guard.Money(r.Capital0), guard.Money(r.Equity), fmt.Sprintf("%+.2f", r.ReturnPct), fmt.Sprintf("%.2f", r.MaxDDPct))
+	tail := ""
+	if curve != "" {
+		tail = "\n<code>" + curve + "</code>"
+	}
+	return fitPre(head, r.Text, tail)
 }
 
 func (b *Bot) cmdEvents(ctx context.Context, chatID int64, lang, query string, n int) {

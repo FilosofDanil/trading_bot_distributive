@@ -1,0 +1,4 @@
+httpx==0.28.1
+websockets==17.2
+# live mode: Ed25519 request signing (self-generated Binance keys), same version as funding_carry
+cryptography==46.0.7

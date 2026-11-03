@@ -92,3 +92,20 @@ Liquidation protection (short perp leg), in order of price rise:
 - [x] control: 🛑 Close all button with confirmation (2 min); live / live-blocked labels
 - [x] docs + README; gofmt/vet/test, pytest, docker build both; live gate vs real Binance → live-blocked
 - [ ] commit + push, deploy in paper mode; owner sets key → switch MODE=live
+
+# Round 4 — density-bounce runner (goal 2026-11-03)
+
+Owner's rules: trade off order-book densities on a sharp approach; stop behind the density; take at the middle
+of the previous move. Source: Engine/Strategy_tester/lab/book (book.py density detector verbatim; feed, SimBroker,
+LiveBroker adapted). Lab paper week 10-24..10-31 (2R target, exit on "density gone"): 997 trades, -7.25 USDT,
+win 10.9 %; 604 "density_gone" exits = 0 % win -> the owner's rules drop that exit and size the take by the move.
+
+- [x] density_bounce/bounce: book.py (lab), setup.py (entry / stop / take = 50 % of the move), feed.py, sim.py,
+      trader.py (lifecycle + risk), live.py (signed, HMAC/Ed25519, exchange stop), state.py, api.py, __main__.py
+- [x] tests: setup rules, sim fills, trader lifecycle on a synthetic book, API, live broker with a fake exchange (25 pass)
+- [x] Dockerfile (tests at build: 25 pass in the image, 223 MB), requirements.txt, railway.json, README; CI job
+- [x] control: generic `text` for plan / positions / report (carry unchanged); gofmt / vet / test pass
+- [x] docs/runner_api.md + README round 4; local paper run against live Binance (16 books synced, first trade
+      HOTUSDT short -> take +2.03R); container: control e2e test (Go client <-> runner) PASS, RSS 88 MB
+- [ ] Owner: commit + push (CI), create the density-bounce service (density_bounce/README.md), extend RUNNERS
+- [ ] Owner: >= 200 paper trades before any judgement; live only after explicit approval + Ed25519 key

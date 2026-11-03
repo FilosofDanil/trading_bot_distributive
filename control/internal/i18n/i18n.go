@@ -379,6 +379,14 @@ var messages = map[string]map[string]string{
 			"Доходность: <b>%s%%</b> · годовых: %s%% · макс. просадка: %s%%\nФандинг: %s · базис: %s · комиссии: %s USDT\n" +
 			"Пары: открыто %d · закрыто %d · стопов %d\n<code>%s</code>",
 	},
+	"report_text_head": {
+		EN: "📊 <b>%s</b> — report\nStart: %s · days: %d\nCapital: %s → equity <b>%s</b> USDT · return <b>%s%%</b> · max drawdown: %s%%",
+		RU: "📊 <b>%s</b> — отчёт\nСтарт: %s · дней: %d\nКапитал: %s → эквити <b>%s</b> USDT · доходность <b>%s%%</b> · макс. просадка: %s%%",
+	},
+	"plan_text_head": {
+		EN: "📋 <b>%s</b> — now (%s UTC)",
+		RU: "📋 <b>%s</b> — сейчас (%s UTC)",
+	},
 	"ev_head": {
 		EN: "🧾 <b>%s</b> — last %d events (UTC)",
 		RU: "🧾 <b>%s</b> — последние события: %d (UTC)",

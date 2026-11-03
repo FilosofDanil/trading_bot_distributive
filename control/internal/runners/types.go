@@ -132,6 +132,8 @@ type Plan struct {
 	Orders      []Order               `json:"orders"`
 	Idle        float64               `json:"idle"`
 	ComputedAt  string                `json:"computed_at"`
+	// Text is a runner's own plain-text view (scalp runners); when set it replaces the carry layout.
+	Text []string `json:"text"`
 }
 
 type Position struct {
@@ -145,6 +147,7 @@ type Position struct {
 	Basis   float64 `json:"basis"`
 	Fees    float64 `json:"fees"`
 	Pnl     float64 `json:"pnl"`
+	Text    string  `json:"text"` // one-line view (scalp runners); when set it replaces the carry columns
 }
 
 // CurvePoint is one equity curve entry: ["2026-10-10", 500.0].
@@ -183,6 +186,7 @@ type Report struct {
 	PairStops   int          `json:"pair_stops"`
 	ActiveDays  int          `json:"active_days"`
 	Curve       []CurvePoint `json:"curve"`
+	Text        []string     `json:"text"` // runner's own lines (scalp runners); replace funding / basis / pairs
 }
 
 type Event struct {

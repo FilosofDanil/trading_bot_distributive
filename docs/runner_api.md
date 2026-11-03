@@ -98,3 +98,16 @@ cover only the held pairs (no new ones) and `would_open` lists the pairs a resum
 ## Strategy ids
 `<runner>.<strategy>`, for example `funding.carry`. Control lists the runners in
 `RUNNERS=funding=http://funding-carry.railway.internal:8080[,name=url...]`.
+
+## Runners without a daily cycle (`bounce.density`, density_bounce/)
+
+A scalp runner fills the same endpoints with what fits, and adds its own view as plain text:
+
+- `plan`, `report`: an optional `"text": ["line", ...]`; `positions`: an optional `"text": "line"` per position.
+  When present, control shows these lines (escaped, in `<pre>`) instead of the carry layout (book, funding, basis,
+  pairs). Carry never sends `text`, so its messages are unchanged.
+- `book` stays `[]`: LossGuard exempts `book` symbols of live strategies from its loss measure (hedged carry legs);
+  a scalp bot's positions must count. Held symbols are in `symbols`, working entries in `working`.
+- `POST /run` returns `{"ok": true, "started": true, "preview": true}`: it emits the current snapshot as a
+  `notify: true` event and re-screens the watched symbols. `flatten` also works in paper mode.
+- Extra: `GET /v1/strategies/{id}/trades?n=<count>` — the last closed trades with their entry features.
