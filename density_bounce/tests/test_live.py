@@ -106,6 +106,17 @@ def test_check_blocks_read_only_key_and_hedge_mode():
     assert asyncio.run(check(rest)) == []
 
 
+def test_check_needs_the_margin_of_all_trades(monkeypatch):
+    from bounce import trader
+    monkeypatch.setitem(trader.RISK, "notional", 500.0)              # 2 trades x 500 at x2 = 500 USDT margin
+    ok = {"GET /sapi/v1/account/apiRestrictions": {"enableFutures": True},
+          "GET /fapi/v1/positionSide/dual": {"dualSidePosition": False}}
+    rest = FakeRest(**ok, **{"GET /fapi/v2/account": {"availableBalance": "499"}})
+    assert any("< 500 USDT" in p for p in asyncio.run(check(rest)))
+    rest = FakeRest(**ok, **{"GET /fapi/v2/account": {"availableBalance": "600"}})
+    assert asyncio.run(check(rest)) == []
+
+
 def test_signatures():
     r = Rest("k", secret="s")
     assert r.sign("a=1") == hmac.new(b"s", b"a=1", hashlib.sha256).hexdigest()

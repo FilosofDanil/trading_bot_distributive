@@ -2,8 +2,8 @@
 python -m bounce check         live mode: read-only check of the key / account, sends no order
 
 Environment: CONTROL_TOKEN (required to serve /v1/*), PORT (8080), MODE (paper | live),
-STATE_FILE (/data/bounce_state.json; live: /data/bounce_live_state.json), PAPER_CAPITAL (100, the paper record's
-starting equity), NOTIFY_TRADES (closes | all | none: which trade events go to Telegram), WATCH (16 symbols),
+STATE_FILE (/data/bounce_state.json; live: /data/bounce_live_state.json), CAPITAL (100; PAPER_CAPITAL also works:
+the record's starting equity, used only when the state file is created), NOTIFY_TRADES (closes | all | none: which trade events go to Telegram), WATCH (16 symbols),
 NOTIONAL (10 USDT per trade), LEVERAGE (2), MAX_OPEN (2), DAY_LOSS (1), TOTAL_LOSS (5), MAX_CONSEC_LOSSES (6),
 MAX_TRADES_DAY (60), PARAMS (JSON object over bounce/setup.py P, e.g. {"take_frac": 0.5, "stop_buf": 0.002}).
 Live also reads BINANCE_API_KEY + BINANCE_API_SECRET (HMAC) or BINANCE_PRIVATE_KEY (Ed25519 PEM).
@@ -30,7 +30,7 @@ def _runner() -> Runner:
         raise SystemExit(f"MODE={mode!r}: use paper or live")
     setup.load_params()
     load_risk()
-    capital = float(os.environ.get("PAPER_CAPITAL", "100"))
+    capital = float(os.environ.get("CAPITAL") or os.environ.get("PAPER_CAPITAL") or "100")
     notify = os.environ.get("NOTIFY_TRADES", "closes").strip().lower()
     if mode == "paper":
         return Runner(Store(os.environ.get("STATE_FILE", "/data/bounce_state.json"), capital), "paper",
@@ -38,7 +38,7 @@ def _runner() -> Runner:
 
     # live: its own state file (the paper record stays as it was)
     from .live import LiveBroker, Rest, check
-    store = Store(os.environ.get("STATE_FILE", "/data/bounce_live_state.json"), 0.0)
+    store = Store(os.environ.get("STATE_FILE", "/data/bounce_live_state.json"), capital)
     rest = Rest.from_env()
     try:
         problems = asyncio.run(check(rest))

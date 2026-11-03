@@ -137,8 +137,10 @@ async def check(rest: Rest) -> list[str]:
     if (await rest.call("GET", "/fapi/v1/positionSide/dual")).get("dualSidePosition"):
         problems.append("the account is in hedge mode; the bot needs one-way mode")
     acc = await rest.call("GET", "/fapi/v2/account")
-    if float(acc["availableBalance"]) < 2 * RISK["notional"]:
-        problems.append(f"available balance {float(acc['availableBalance']):.2f} < {2 * RISK['notional']:g} USDT")
+    margin = RISK["max_open"] * RISK["notional"] / RISK["leverage"]    # isolated margin of every trade at once
+    if float(acc["availableBalance"]) < margin:
+        problems.append(f"futures available balance {float(acc['availableBalance']):.2f} < {margin:g} USDT "
+                        f"({RISK['max_open']} x {RISK['notional']:g} USDT at x{RISK['leverage']})")
     return problems
 
 
