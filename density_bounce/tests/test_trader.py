@@ -34,7 +34,81 @@ async def open_long(t, broker):
     await settle()
     assert s.state == "open" and s.entry_px == pytest.approx(1.0002)
     assert broker.o["XUSDT"]["kind"] == "open"                   # stop + take resting
+    assert [p["name"] for p in s.parts] == ["tp2"]               # 9 USDT: too small to split, one take
     return s
+
+
+async def open_big_long(t, broker):
+    """60 USDT: 59 units split 29 (tp1 +1 R) / 21 (tp2, the take) / 9 (the runner)."""
+    await t._seek("XUSDT", t.books["XUSDT"], NOW)
+    s = t.slots["XUSDT"]
+    broker.on_trade("XUSDT", Trade(NOW + 1, 10001, 100.0, True))
+    await settle()
+    assert [(p["name"], p["qty"], p["px"]) for p in s.parts] == [("tp1", 29, 1.0019), ("tp2", 21, 1.0050),
+                                                                   ("run", 9, 1.0100)]
+    return s
+
+
+def test_partial_takes_break_even_and_runner_lock(tmp_path, monkeypatch):
+    monkeypatch.setitem(RISK, "notional", 60.0)
+    t, broker, store = make(tmp_path)
+    b = t.books["XUSDT"]
+
+    async def go():
+        s = await open_big_long(t, broker)
+        broker.on_trade("XUSDT", Trade(NOW + 5, 10020, 50.0, False))     # through tp1
+        await settle()
+        assert [p["done"] for p in s.parts] == [True, False, False]
+        await t._watch_open(s, b, NOW + 5)
+        assert s.manage.be_done and broker.o["XUSDT"]["stop"] == 10008   # break-even: entry + 0.06 %
+        broker.on_trade("XUSDT", Trade(NOW + 20, 10051, 50.0, False))    # through tp2
+        await settle()
+        await t._watch_open(s, b, NOW + 20)
+        assert s.extra["lock_done"] and broker.o["XUSDT"]["stop"] == 10019   # the runner keeps tp1's profit
+        broker.on_trade("XUSDT", Trade(NOW + 40, 10019, 50.0, True))     # back to tp1: the runner stops out
+        await settle()
+    asyncio.run(go())
+    assert not t.slots
+    tr = store.data["trades"][-1]
+    assert tr["reason"] == "stop_lock" and [p["done"] for p in tr["parts"]] == [True, True, False]
+    stop_px = 1.0019 * (1 - 0.0002)
+    gross = 29 * (1.0019 - 1.0002) + 21 * (1.0050 - 1.0002) + 9 * (stop_px - 1.0002)
+    fees = 59 * 1.0002 * 0.0002 + (29 * 1.0019 + 21 * 1.0050) * 0.0002 + 9 * stop_px * 0.0005
+    assert tr["pnl"] == pytest.approx(gross - fees, abs=1e-6) and tr["fees"] == pytest.approx(fees, abs=1e-6)
+    assert tr["exit"] == pytest.approx((29 * 1.0019 + 21 * 1.0050 + 9 * stop_px) / 59)
+    assert any("closed (stop_lock)" in e["msg"] and "parts tp1 tp2" in e["msg"] for e in store.data["events"])
+
+
+def test_runner_take_closes_the_last_part(tmp_path, monkeypatch):
+    monkeypatch.setitem(RISK, "notional", 60.0)
+    t, broker, store = make(tmp_path)
+
+    async def go():
+        await open_big_long(t, broker)
+        broker.on_trade("XUSDT", Trade(NOW + 30, 10101, 50.0, False))    # one print through every take
+        await settle()
+    asyncio.run(go())
+    tr = store.data["trades"][-1]
+    assert not t.slots and tr["reason"] == "take" and all(p["done"] for p in tr["parts"])
+    assert tr["exit"] == pytest.approx((29 * 1.0019 + 21 * 1.0050 + 9 * 1.0100) / 59)
+
+
+def test_partial_then_initial_stop(tmp_path, monkeypatch):
+    monkeypatch.setitem(RISK, "notional", 60.0)
+    t, broker, store = make(tmp_path)
+
+    async def go():
+        await open_big_long(t, broker)
+        broker.on_trade("XUSDT", Trade(NOW + 5, 10020, 50.0, False))     # tp1, but the stop is not moved yet
+        await settle()
+        broker.on_trade("XUSDT", Trade(NOW + 6, 9985, 50.0, True))       # the rest (30) stops out
+        await settle()
+    asyncio.run(go())
+    tr = store.data["trades"][-1]
+    stop_px = 0.9985 * (1 - 0.0002)
+    gross = 29 * (1.0019 - 1.0002) + 30 * (stop_px - 1.0002)
+    fees = 59 * 1.0002 * 0.0002 + 29 * 1.0019 * 0.0002 + 30 * stop_px * 0.0005
+    assert tr["reason"] == "stop" and tr["pnl"] == pytest.approx(gross - fees, abs=1e-6)
 
 
 def test_take_at_middle_of_the_move(tmp_path):

@@ -1,6 +1,7 @@
 """Trade lifecycle and risk limits, shared by paper and live mode.
 
-A Slot is one symbol's trade: entry working -> open (protected by a stop + a reduce-only take) -> closed.
+A Slot is one symbol's trade: entry working -> open (protected by a stop + reduce-only takes, one per part:
+tp1 / tp2 / run, see setup.py) -> closed. The stop always closes whatever is left of the position.
 The broker (sim.SimBroker or live.LiveBroker) executes and reports back through on_entry_result / on_closed.
 `tick()` is called every 0.5 s by the runner loop; the HTTP API reads `view()` from another thread.
 """
@@ -60,7 +61,15 @@ class Slot:
     cancel_sent: bool = False
     close_sent: bool = False
     oid: str = ""                  # client order id of the entry (live)
+    parts: list = field(default_factory=list)    # [{name, px, qty, done, id, fill_px}] of the takes
     extra: dict = field(default_factory=dict)
+
+
+def stop_reason(s: Slot) -> str:
+    """The name of a stop-out: after the runner lock, after break-even, or the initial stop."""
+    if s.extra.get("lock_done"):
+        return "stop_lock"
+    return "stop_be" if s.manage and s.manage.be_done else "stop"
 
 
 class Trader:
@@ -96,6 +105,28 @@ class Trader:
         if q * price > RISK["notional"] * 1.6:
             return 0.0                               # step too coarse for this notional
         return q
+
+    def split(self, s: Slot) -> list[dict]:
+        """The takes of a filled position: tp1 / tp2 / run quantities on the lot grid; a part too small for the
+        exchange (min qty, min notional + 10 %) is merged into tp2, so a small position keeps a single take."""
+        i = self.info[s.sym]
+        step, q, px = i["step"], s.filled_qty, s.entry_px
+
+        def floor(x: float) -> float:
+            return round(math.floor(x / step + 1e-9) * step, 10)
+
+        def ok(x: float) -> bool:
+            return x >= i["min_qty"] and x * px >= 1.1 * i["min_notional"]
+        p = setup.P
+        q1 = floor(q * p["tp1_part"]) if s.plan.tp1 else 0.0
+        q3 = floor(q * (1 - p["tp1_part"] - p["tp2_part"])) if s.plan.tp_run else 0.0
+        q1, q3 = (q1 if ok(q1) else 0.0), (q3 if ok(q3) else 0.0)
+        q2 = round(q - q1 - q3, 10)
+        if q2 <= 0 or not ok(q2):
+            q1 = q3 = 0.0
+            q2 = q
+        parts = [("tp1", s.plan.tp1, q1), ("tp2", s.plan.tp, q2), ("run", s.plan.tp_run, q3)]
+        return [{"name": n, "px": x, "qty": v, "done": False, "id": "", "fill_px": 0.0} for n, x, v in parts if v > 0]
 
     def block(self, now: float) -> str:
         """Why no new entry may open now ('' = free)."""
@@ -185,17 +216,45 @@ class Trader:
     async def _watch_open(self, s: Slot, b: SymbolBook, now: float) -> None:
         if s.close_sent or s.manage is None:
             return
-        why = setup.exit_reason(b, s.plan, s.entry_px, s.manage, now)
-        if why == "be":
+        done = {p["name"] for p in s.parts if p["done"]}
+        names = {p["name"] for p in s.parts}
+        if "tp2" in done and "run" in names and not s.extra.get("lock_done"):
+            s.extra["lock_done"] = True                            # the runner keeps the profit of tp1
+            tp1 = next((p["px"] for p in s.parts if p["name"] == "tp1"), 0.0)
+            px = tp1 or setup.be_price(s.plan, s.entry_px, b.tick_size)
             s.manage.be_done = True
-            px = setup.be_price(s.plan, s.entry_px, b.tick_size)
-            try:
-                await self.broker.move_stop(s, px)
-                s.stop = px
-            except Exception as e:
-                self.store.event("error", f"{s.sym}: move stop: {e}")
+            await self._move_stop(s, px, "stop_lock")
+            return
+        why = setup.exit_reason(b, s.plan, s.entry_px, s.manage, now)
+        if why == "be" or ("tp1" in done and not s.manage.be_done):
+            s.manage.be_done = True
+            await self._move_stop(s, setup.be_price(s.plan, s.entry_px, b.tick_size), "stop_be")
         elif why:
             await self.close(s, why)
+
+    async def _move_stop(self, s: Slot, px: float, why: str) -> None:
+        try:
+            await self.broker.move_stop(s, px)
+            s.stop = px
+            log.info("%s stop -> %g (%s)", s.sym, px, why)
+        except Exception as e:
+            if getattr(e, "code", None) == -2021:                 # price is already past the new stop
+                await self.close(s, why)
+                return
+            self.store.event("error", f"{s.sym}: move stop: {e}")
+
+    def on_part(self, sym: str, name: str, qty: float, px: float) -> None:
+        """A partial take filled (the broker reports each part once)."""
+        s = self.slots.get(sym)
+        if s is None:
+            return
+        for p in s.parts:
+            if p["name"] == name and not p["done"]:
+                p["done"], p["fill_px"] = True, px
+                sgn = 1 if s.plan.side == "long" else -1
+                r = abs(s.entry_px - s.plan.stop) or s.plan.risk
+                self.store.event("info", f"{s.plan.side} {sym}: {name} {qty:g} @ {px:g} "
+                                         f"({sgn * (px - s.entry_px) / r:+.2f}R)", self.notify_trades == "all")
 
     async def close(self, s: Slot, why: str) -> None:
         if s.close_sent:
@@ -238,10 +297,12 @@ class Trader:
         s.filled_qty, s.entry_px, s.entry_fee = filled, avg_px, fee
         s.state, s.opened_at, s.stop = "open", time.time(), s.plan.stop
         s.manage = setup.Manage(opened_at=s.opened_at)
+        s.parts = self.split(s)
         self._stat("filled")
+        parts = ", ".join(f"{p['name']} {p['qty']:g} @ {p['px']:g}" for p in s.parts)
         self.store.event("info", f"opened {s.plan.side} {sym} {filled:g} @ {avg_px:g}, stop {s.plan.stop:g}, "
-                                 f"take {s.plan.tp:g} (density {s.plan.features.get('density_usd', 0):,} USDT)",
-                         self.notify_trades == "all")
+                                 f"take {s.plan.tp:g} (density {s.plan.features.get('density_usd', 0):,} USDT); "
+                                 f"parts {parts}", self.notify_trades == "all")
         asyncio.get_event_loop().create_task(self._protect(s))
 
     async def _protect(self, s: Slot) -> None:
@@ -266,7 +327,8 @@ class Trader:
               "notional": round(s.entry_px * s.filled_qty, 4), "stop": s.plan.stop, "tp": s.plan.tp,
               "reason": reason, "gross": round(sgn * (exit_px - s.entry_px) * s.filled_qty, 6),
               "fees": round(fees, 6), "pnl": round(pnl, 6), "r": round(pnl / r_usd, 3) if r_usd else None,
-              "hold_s": round(now - s.opened_at, 1), "features": s.plan.features}
+              "hold_s": round(now - s.opened_at, 1), "features": s.plan.features,
+              "parts": [{k: p[k] for k in ("name", "px", "qty", "done", "fill_px")} for p in s.parts]}
         self.store.record_trade(tr)
         d = self.store.data
         if d["consec_losses"] >= RISK["max_consec"]:
@@ -274,8 +336,10 @@ class Trader:
             self.store.set("consec_losses", 0)
         self.cool[sym] = now + RISK["sym_cooldown"]
         icon = "✅" if pnl > 0 else "❌"
+        hit = " ".join(p["name"] for p in s.parts if p["done"])
         self.store.event("info", f"{icon} {s.plan.side} {sym} closed ({reason}) {s.entry_px:g} -> {exit_px:g}: "
                                  f"{pnl:+.4f} USDT ({tr['r']:+.2f}R), held {tr['hold_s']:.0f} s"
+                                 + (f", parts {hit}" if hit and len(s.parts) > 1 else "")
                          if tr["r"] is not None else f"{icon} {sym} closed ({reason}): {pnl:+.4f} USDT",
                          self.notify_trades != "none")
 

@@ -119,5 +119,13 @@ win 10.9 %; 604 "density_gone" exits = 0 % win -> the owner's rules drop that ex
 - [x] runners MODE=live (carry 500 / 3 coins; bounce 500 per trade x2, max 2, day -15, total -75) -> SUCCESS, both
       live-blocked, no order: carry key lacks Universal Transfer; bounce futures available 365.17 < 500
 - [x] 12225f6: live used the paper STATE_FILE (Dockerfile ENV) -> LIVE_STATE_FILE /data/*_live_state.json
-- [ ] Owner: enable Permits Universal Transfer on the key; futures available >= 500 (or bounce MAX_OPEN=1);
-      then Claude redeploys both runners and checks "mode live"
+- [x] Owner 2026-11-03: no Universal Transfer, volumes 300 -> a70bd42 carry no-transfer mode (each wallet pays
+      its own leg), empty live records follow the capital setting; carry CARRY_CAPITAL=300, bounce CAPITAL=300
+      NOTIONAL=300 DAY_LOSS=9 TOTAL_LOSS=45; deployed SUCCESS both, logs "mode live" (carry 42, bounce 30 pytest)
+- [ ] Owner: keep ~100 USDT on spot (carry spot legs) and ~500 on futures (carry ~200 + bounce margin 300)
+- [x] 2026-11-04 journal of the first 45 live trades (artifact) + analysis: no entry feature separates wins;
+      17 of 31 stops had been >= +1 R; AKE (tick 2.5-3.3 bp) 0/6, -5.9 USDT
+- [x] Owner 2026-11-04: bounce v0.2.0 - density >= 50k USDT, tick <= 0.02 % (setup + screener), takes in parts
+      1/2 at +1 R, 1/3 at the take, 1/6 runner to the move start; break-even at +0.7 R or tp1, runner stop at tp1
+      after tp2; book.DENS overridable via PARAMS; 37 pytest pass
+- [ ] deploy v0.2.0, check "v0.2.0 started: mode live" and the first "parts" in a closed trade

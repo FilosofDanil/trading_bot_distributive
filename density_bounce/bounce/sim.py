@@ -4,7 +4,7 @@ Fill model (conservative for a small order):
 - post-only entry limit: rejected if it would cross; filled when a trade prints THROUGH the price, or when the
   volume traded AT the price after placement exceeds the queue that was resting there when we joined;
 - stop (last price): triggered by the first trade at/through it, filled at that trade price - 0.02 % slippage;
-- reduce-only take limit: the same queue rule as the entry;
+- reduce-only take limits (one per part): the same queue rule as the entry, each with its own queue;
 - market close: best opposite price - 0.01 %.
 Fees: maker 0.02 %, taker 0.05 %. Latency is not modelled, so paper results are an upper bound.
 """
@@ -13,7 +13,7 @@ from __future__ import annotations
 from typing import Any
 
 from .book import SymbolBook, Trade
-from .trader import FEE, Slot
+from .trader import FEE, Slot, stop_reason
 
 
 class SimBroker:
@@ -41,10 +41,12 @@ class SimBroker:
 
     async def protect(self, s: Slot) -> None:
         b = self._book(s.sym)
-        tp = b.t(s.plan.tp)
         side = "ask" if s.plan.side == "long" else "bid"
-        self.o[s.sym] = {"kind": "open", "stop": b.t(s.plan.stop), "tp": tp, "queue": b.qty_at(side, tp),
-                         "traded": 0.0}
+        takes = [{"name": p["name"], "qty": p["qty"], "tick": b.t(p["px"]), "queue": b.qty_at(side, b.t(p["px"])),
+                  "traded": 0.0} for p in s.parts]
+        # left = position still open; gross / fees / xn (exit notional) of the parts already taken
+        self.o[s.sym] = {"kind": "open", "stop": b.t(s.plan.stop), "takes": takes, "left": s.filled_qty,
+                         "gross": 0.0, "fees": 0.0, "xn": 0.0}
 
     async def move_stop(self, s: Slot, price: float) -> None:
         o = self.o.get(s.sym)
@@ -59,11 +61,25 @@ class SimBroker:
         self._finish(s, px, FEE["taker"], why)
 
     def _finish(self, s: Slot, px: float, fee_rate: float, why: str) -> None:
-        self.o.pop(s.sym, None)
+        """Close what is left at `px`; the trade's exit is the average over the parts taken before."""
+        o = self.o.pop(s.sym, None) or {}
         sgn = 1 if s.plan.side == "long" else -1
-        fee = px * s.filled_qty * fee_rate
-        pnl = sgn * (px - s.entry_px) * s.filled_qty - s.entry_fee - fee
-        self.trader.on_closed(s.sym, px, pnl, s.entry_fee + fee, why)
+        q = o.get("left", s.filled_qty)
+        fee = px * q * fee_rate
+        gross = o.get("gross", 0.0) + sgn * (px - s.entry_px) * q
+        fees = s.entry_fee + o.get("fees", 0.0) + fee
+        exit_px = (o.get("xn", 0.0) + px * q) / s.filled_qty
+        self.trader.on_closed(s.sym, exit_px, gross - fees, fees, why)
+
+    def _take(self, s: Slot, o: dict, t: dict, px: float) -> None:
+        sgn = 1 if s.plan.side == "long" else -1
+        q = min(t["qty"], o["left"])
+        o["left"] = round(o["left"] - q, 10)
+        o["gross"] += sgn * (px - s.entry_px) * q
+        o["fees"] += px * q * FEE["maker"]
+        o["xn"] += px * q
+        o["takes"].remove(t)
+        self.trader.on_part(s.sym, t["name"], q, px)
 
     def on_trade(self, sym: str, tr: Trade) -> None:
         o = self.o.get(sym)
@@ -85,11 +101,15 @@ class SimBroker:
         if o["kind"] == "open" and s.state in ("open", "closing"):
             if tr.tick <= o["stop"] if long else tr.tick >= o["stop"]:
                 px = b.p(tr.tick) * (1 - 0.0002 if long else 1 + 0.0002)
-                self._finish(s, px, FEE["taker"], "stop_be" if s.manage and s.manage.be_done else "stop")
+                self._finish(s, px, FEE["taker"], stop_reason(s))
                 return
-            tp = o["tp"]
-            through = tr.tick > tp if long else tr.tick < tp
-            if tr.tick == tp and tr.buyer_maker != long:
-                o["traded"] += tr.qty
-            if through or o["traded"] > o["queue"] + s.filled_qty:
-                self._finish(s, b.p(tp), FEE["maker"], "take")
+            for t in list(o["takes"]):
+                through = tr.tick > t["tick"] if long else tr.tick < t["tick"]
+                if tr.tick == t["tick"] and tr.buyer_maker != long:
+                    t["traded"] += tr.qty
+                if through or t["traded"] > t["queue"] + t["qty"]:
+                    self._take(s, o, t, b.p(t["tick"]))
+            if o["left"] <= 1e-12:
+                self.o.pop(sym, None)
+                fees = s.entry_fee + o["fees"]
+                self.trader.on_closed(sym, o["xn"] / s.filled_qty, o["gross"] - fees, fees, "take")

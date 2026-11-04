@@ -9,30 +9,36 @@ so `control` manages it from Telegram like `funding_carry`. **Paper mode by defa
 
 | | rule (parameters in `bounce/setup.py` `P`) |
 |---|---|
-| density | resting order ≥ 8× the median level, ≥ 25k USDT, ≥ ½ minute of turnover (`bounce/book.py`, the lab's detector); alive ≥ 20 s, still ≥ 70 % of its peak, touched ≤ 2 times |
+| density | resting order ≥ 8× the median level, ≥ 50k USDT (25k until 2026-11-04), ≥ ½ minute of turnover (`bounce/book.py` `DENS`, the lab's detector); alive ≥ 20 s, still ≥ 70 % of its peak, touched ≤ 2 times |
 | sharp approach | mid moved ≥ 0.30 % toward the density in the last 60 s, covering ≥ half of the distance it had 60 s ago; now within 0.35 % of it |
 | previous move | from the extreme of the last 5 min (the high before a drop onto a bid wall, the low before a rally into an ask wall) to the density, ≥ 0.50 % |
 | entry | post-only limit 0.02 % (≥ 1 tick) in front of the density |
 | **stop** | **0.15 % (≥ 2 ticks) behind the density** |
 | **take** | **the middle of the previous move** (50 % retracement from the density back toward the extreme) |
-| filters | reward ≥ 1.0 × risk, risk 0.10–0.80 % of price, tick ≤ 0.04 % of price, spread ≤ 0.06 % |
-| exits | stop, take, or market close after 15 min. No exit when the density disappears (`exit_on_gone`, off) |
+| filters | reward ≥ 1.0 × risk, risk 0.10–0.80 % of price, tick ≤ 0.02 % of price (the screener too; 0.04 % until 2026-11-04: AKE at 2.5–3.3 bp lost 6 of 6), spread ≤ 0.06 % |
+| **takes in parts** | ½ at +1 R (`tp1`, at most half way to the take), ⅓ at the take (`tp2`), the last ⅙ runs to the start of the move (`run`). A part too small for the exchange is merged into `tp2` |
+| **break-even** | at +0.7 R (`be_at_r`) or when `tp1` fills the stop moves to entry + 0.06 % (fees); when `tp2` fills it moves to `tp1` for the runner |
+| exits | stop (`stop`, `stop_be`, `stop_lock`), `take` (every part filled), or market close after 15 min. No exit when the density disappears (`exit_on_gone`, off) |
 | entry cancel | density gone / below 50 % of its peak, price 0.8 % away, or 3 min without a fill |
 
 Why there is no "density gone" exit: the lab's week of paper trading of a similar setup (Engine/Strategy_tester,
 lab/book, 2026-10-24 → 10-31: 2R target, exit as soon as the wall disappears) closed 997 trades at −7.25 USDT,
 win 10.9 %; 604 of them were "density gone" exits with 0 % wins. The stop behind the wall is the exit here.
 
-Any parameter can be changed without a code change: `PARAMS={"take_frac":0.5,"stop_buf":0.002,"impulse_min":0.004}`
-(unknown keys stop the start, so a typo never passes silently).
+Why parts and break-even (2026-11-04, the first 45 live trades): 17 of 31 stop-outs had been +1 R or more before
+they turned (median +1.2 R), while only 14 of 45 trades reached the take at the middle of the move.
+
+Any parameter of `setup.P` or `book.DENS` can be changed without a code change:
+`PARAMS={"take_frac":0.5,"usd_min":80000,"be_at_r":0.5,"tp1_part":0.5}` (unknown keys stop the start, so a typo
+never passes silently).
 
 ## Money and safety
 
 - `NOTIONAL` 10 USDT per trade, `LEVERAGE` 2 isolated, `MAX_OPEN` 2 trades at once, one per symbol, 60 s cooldown.
 - No new entries for the UTC day after `DAY_LOSS` −1 USDT or `MAX_CONSEC_LOSSES` 6 losses in a row;
   `TOTAL_LOSS` −5 USDT halts the strategy for good (`state: error`). Pause / resume from Telegram is persisted.
-- Live: the stop is an exchange-side `STOP_MARKET closePosition` (Algo API) placed the moment the entry fills, plus a
-  reduce-only take; if the stop cannot be placed the position is closed at market. Client ids start with `dbb`;
+- Live: the stop is an exchange-side `STOP_MARKET closePosition` (Algo API) placed the moment the entry fills, plus
+  one reduce-only take per part; if the stop cannot be placed the position is closed at market. Client ids start with `dbb`;
   symbols with any position or order the bot did not place (manual, carry `fc*`, lab `skb*`) and BTC/ETH are never
   traded. Leftovers are cancelled / closed on the next start.
 - The strategy reports `book: []` on purpose: control's LossGuard exempts `book` symbols of live strategies
@@ -58,7 +64,7 @@ Extra endpoint: `GET /v1/strategies/bounce.density/trades?n=50` — the journal 
 | `WATCH` | `16` | symbols watched at once (2 websockets each) |
 | `NOTIONAL`, `LEVERAGE`, `MAX_OPEN`, `DAY_LOSS`, `TOTAL_LOSS`, `MAX_CONSEC_LOSSES`, `MAX_TRADES_DAY` | 10, 2, 2, 1, 5, 6, 60 | risk |
 | `NOTIFY_TRADES` | `closes` | `all` / `closes` / `none` |
-| `PARAMS` | — | JSON over `setup.P` |
+| `PARAMS` | — | JSON over `setup.P` and `book.DENS` |
 | `BINANCE_API_KEY` + `BINANCE_API_SECRET` or `BINANCE_PRIVATE_KEY` | — | live only (sealed); Ed25519 PEM, `\n` may be literal |
 
 Live mode starts only when `python -m bounce check` passes: futures trading enabled on the key, withdrawals off,

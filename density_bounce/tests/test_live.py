@@ -19,6 +19,8 @@ class FakeRest:
         self.calls = []
         self.answers = answers
         self.pos = {}
+        self.orders = {}                       # client id -> GET /fapi/v1/order answer
+        self.pos_seq = []                      # scripted positionAmt readings for XUSDT (then self.pos)
 
     async def sync_time(self):
         pass
@@ -27,8 +29,12 @@ class FakeRest:
         self.calls.append((method, path, p))
         key = f"{method} {path}"
         if key == "GET /fapi/v2/positionRisk":
+            if self.pos_seq and p.get("symbol") == "XUSDT":
+                self.pos["XUSDT"] = self.pos_seq.pop(0)
             syms = [p["symbol"]] if "symbol" in p else list(self.pos)
             return [{"symbol": s, "positionAmt": str(self.pos.get(s, 0))} for s in syms]
+        if key == "GET /fapi/v1/order":
+            return self.orders.get(p["origClientOrderId"], {"status": "NEW", "executedQty": "0"})
         if key == "POST /fapi/v1/algoOrder":
             return {"algoStatus": "NEW"}
         if key == "GET /fapi/v1/exchangeInfo":
@@ -43,11 +49,46 @@ def broker_with(rest, tmp_path):
     return b, t
 
 
-def open_slot(t):
-    s = Slot("XUSDT", Plan("long", 1.0002, 0.9985, 1.0050, ("bid", 10000)), 9.0, state="open", filled_qty=9.0,
-             entry_px=1.0002)
+def open_slot(t, qty=9.0):
+    s = Slot("XUSDT", Plan("long", 1.0002, 0.9985, 1.0050, ("bid", 10000), tp1=1.0019, tp_run=1.0100), qty,
+             state="open", filled_qty=qty, entry_px=1.0002)
+    s.parts = t.split(s)
     t.slots["XUSDT"] = s
     return s
+
+
+def test_takes_one_reduce_only_order_per_part(tmp_path):
+    rest = FakeRest()
+    b, t = broker_with(rest, tmp_path)
+    s = open_slot(t, 59.0)
+    rest.pos["XUSDT"] = 59.0
+
+    async def go():
+        await b.protect(s)
+        for task in b.tasks:
+            task.cancel()
+    asyncio.run(go())
+    takes = [p for m, path, p in rest.calls if path == "/fapi/v1/order" and m == "POST"]
+    assert [(o["price"], o["quantity"]) for o in takes] == [("1.0019", "29"), ("1.0050", "21"), ("1.0100", "9")]
+    assert all(o["reduceOnly"] == "true" for o in takes)
+    assert t.store.data["slots"]["XUSDT"]["tp_ids"] == [p["id"] for p in s.parts]
+
+
+def test_poll_reports_parts_and_cancels_the_rest(tmp_path, monkeypatch):
+    rest = FakeRest()
+    b, t = broker_with(rest, tmp_path)
+    s = open_slot(t, 59.0)
+    for p, cid in zip(s.parts, ("t1", "t2", "t3")):
+        p["id"] = cid
+    rest.orders["t1"] = {"status": "FILLED", "executedQty": "29", "avgPrice": "1.0019"}
+    rest.pos_seq = [59.0, 30.0, 30.0, 0.0, 0.0]                      # tp1 fills, then the stop closes the rest
+    sleep = asyncio.sleep
+    monkeypatch.setattr("bounce.live.asyncio.sleep", lambda _: sleep(0))
+    asyncio.run(b._poll_open(s))
+    tr = t.store.data["trades"][-1]
+    assert tr["reason"] == "stop" and [p["done"] for p in tr["parts"]] == [True, False, False]
+    cancelled = {p["origClientOrderId"] for m, path, p in rest.calls if m == "DELETE" and path == "/fapi/v1/order"}
+    assert cancelled == {"t2", "t3"}
 
 
 def test_protect_places_exchange_stop_and_reduce_only_take(tmp_path):

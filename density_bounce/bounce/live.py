@@ -5,8 +5,9 @@ Safety rules:
   30 s), never BTCUSDT / ETHUSDT; every client id starts with "dbb" and cancel / flatten only touch those ids,
   so the carry bot ("fc"), the lab scalper ("skb") and manual trading are never touched;
 - isolated margin, LEVERAGE (2), NOTIONAL (10 USDT); the entry is a post-only (GTX) limit;
-- the moment an entry fills: an exchange-side STOP_MARKET closePosition algo order + a reduce-only limit take;
-  if the stop cannot be placed the position is closed at market at once;
+- the moment an entry fills: an exchange-side STOP_MARKET closePosition algo order (it closes whatever is left)
+  + one reduce-only limit take per part (tp1 / tp2 / run); if the stop cannot be placed the position is closed
+  at market at once; a shrinking position is checked against the takes, and the trader moves the stop;
 - the bot's open slots are kept in the state file; on start leftovers are cancelled / closed.
 
 Keys: BINANCE_API_KEY + BINANCE_API_SECRET (HMAC) or BINANCE_PRIVATE_KEY (Ed25519 PEM). Binance gives an HMAC
@@ -28,7 +29,7 @@ from urllib.parse import quote, urlencode
 
 import httpx
 
-from .trader import FEE, RISK, Slot
+from .trader import FEE, RISK, Slot, stop_reason
 
 log = logging.getLogger("bounce")
 FAPI = "https://fapi.binance.com"
@@ -166,7 +167,7 @@ class LiveBroker:
         st = {}
         for sym, s in self.trader.slots.items():
             st[sym] = {"side": s.plan.side, "state": s.state, "qty": s.filled_qty or s.qty, "entry": s.entry_px,
-                       "oid": s.oid, "stop_id": s.extra.get("stop_id"), "tp_id": s.extra.get("tp_id"),
+                       "oid": s.oid, "stop_id": s.extra.get("stop_id"), "tp_ids": [p["id"] for p in s.parts],
                        "placed_at": s.placed_at}
         self.trader.store.set("slots", st)
 
@@ -205,7 +206,7 @@ class LiveBroker:
         live_ids = {c for c, t in self.issued.items() if now - t < 60}   # just issued: maybe not recorded yet
         self.issued = {c: t for c, t in self.issued.items() if now - t < 3600}
         for s in self.trader.slots.values():
-            live_ids |= {s.oid, s.extra.get("stop_id"), s.extra.get("tp_id")}
+            live_ids |= {s.oid, s.extra.get("stop_id")} | {p["id"] for p in s.parts}
         for o in await self.rest.call("GET", "/fapi/v1/openOrders"):
             c = str(o.get("clientOrderId", ""))
             if c.startswith(PREFIX) and c not in live_ids:
@@ -343,16 +344,31 @@ class LiveBroker:
             s.extra["stop_id"] = await self._place_stop(s, s.plan.stop)   # one retry, then the trader flattens
         self.save_state()
         i = self.trader.info[s.sym]
-        tp_id = self.cid("t")
-        try:
-            await self.rest.call("POST", "/fapi/v1/order", symbol=s.sym,
-                                 side="SELL" if s.plan.side == "long" else "BUY", type="LIMIT", timeInForce="GTC",
-                                 price=fmt(s.plan.tp, i["tick"]), quantity=fmt(s.filled_qty, i["step"]),
-                                 reduceOnly="true", newClientOrderId=tp_id)
-            s.extra["tp_id"] = tp_id
-        except BinanceError as e:
-            log.warning("%s take not placed (%s); the stop protects the position", s.sym, e)
+        for p in s.parts:
+            tp_id = self.cid("t")
+            try:
+                await self.rest.call("POST", "/fapi/v1/order", symbol=s.sym,
+                                     side="SELL" if s.plan.side == "long" else "BUY", type="LIMIT", timeInForce="GTC",
+                                     price=fmt(p["px"], i["tick"]), quantity=fmt(p["qty"], i["step"]),
+                                     reduceOnly="true", newClientOrderId=tp_id)
+                p["id"] = tp_id
+            except BinanceError as e:
+                log.warning("%s take %s not placed (%s); the stop protects the position", s.sym, p["name"], e)
         self.save_state()
+
+    async def _check_parts(self, s: Slot, cancel: bool = False) -> None:
+        """Report the takes that filled; with `cancel` (the position is flat) cancel the ones that did not."""
+        for p in s.parts:
+            if p["done"] or not p["id"]:
+                continue
+            try:
+                o = await self.rest.call("GET", "/fapi/v1/order", symbol=s.sym, origClientOrderId=p["id"])
+                if o["status"] == "FILLED":
+                    self.trader.on_part(s.sym, p["name"], float(o["executedQty"]), float(o.get("avgPrice") or p["px"]))
+                elif cancel:
+                    await self._cancel_order(s.sym, p["id"])
+            except Exception as e:
+                log.warning("take check %s %s: %r", s.sym, p["name"], e)
 
     async def move_stop(self, s: Slot, price: float) -> None:
         new_id = await self._place_stop(s, price)            # new stop first, so the position is never naked
@@ -363,8 +379,9 @@ class LiveBroker:
 
     async def close(self, s: Slot, why: str) -> None:
         i = self.trader.info[s.sym]
-        if s.extra.get("tp_id"):
-            await self._cancel_order(s.sym, s.extra["tp_id"])
+        for p in s.parts:
+            if p["id"] and not p["done"]:
+                await self._cancel_order(s.sym, p["id"])
         amt = await position_amt(self.rest, s.sym)
         if amt != 0:
             await self.rest.call("POST", "/fapi/v1/order", symbol=s.sym, side="SELL" if amt > 0 else "BUY",
@@ -374,6 +391,8 @@ class LiveBroker:
 
     async def _poll_open(self, s: Slot) -> None:
         zeros = 0
+        left = s.filled_qty
+        step = self.trader.info[s.sym]["step"]
         while self.trader.slots.get(s.sym) is s:
             await asyncio.sleep(1.0)
             try:
@@ -381,22 +400,17 @@ class LiveBroker:
             except Exception as e:
                 log.warning("poll position %s: %r", s.sym, e)
                 continue
+            if 0 < abs(amt) < left - step / 2:               # smaller: a take filled (partly)
+                left = abs(amt)
+                await self._check_parts(s)
             zeros = zeros + 1 if amt == 0 else 0
             if zeros < 2:                                     # two flat readings in a row: no stale-read race
                 continue
             await self._cancel_algo(s.extra.get("stop_id"))
+            await self._check_parts(s, cancel=True)
             reason = s.extra.get("exit_reason", "")
-            if s.extra.get("tp_id"):
-                try:
-                    o = await self.rest.call("GET", "/fapi/v1/order", symbol=s.sym, origClientOrderId=s.extra["tp_id"])
-                    if o["status"] == "FILLED":
-                        reason = "take"
-                    else:
-                        await self._cancel_order(s.sym, s.extra["tp_id"])
-                except Exception as e:
-                    log.warning("take check %s: %r", s.sym, e)
             if not reason:
-                reason = "stop_be" if s.manage and s.manage.be_done else "stop"
+                reason = "take" if s.parts and all(p["done"] for p in s.parts) else stop_reason(s)
             exit_px, pnl, fees = await self._realized(s)
             self.trader.on_closed(s.sym, exit_px, pnl, fees, reason)
             self.save_state()

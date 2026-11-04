@@ -14,7 +14,7 @@ DENS = {
     "band": 0.015,        # look for densities within 1.5 % of mid
     "base_band": 0.02,    # baseline = median level notional within 2 % of mid on that side
     "ratio": 8.0,         # density >= 8 x the median level
-    "usd_min": 25_000.0,  # and >= 25k USDT
+    "usd_min": 50_000.0,  # and >= 50k USDT (25k until 2026-11-04)
     "minute_k": 0.5,      # and >= half the average traded USDT per minute (last 15 min of tape)
     "gone_frac": 0.30,    # a density with < 30 % of its peak size left is gone
 }

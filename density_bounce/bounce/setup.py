@@ -2,8 +2,9 @@
 
 Long off a bid density (support), short off an ask density (resistance):
 
-1. Density: a resting order >= 8x the median level, >= 25k USDT, >= half a minute of turnover (book.py DENS),
-   alive >= 20 s (anti-spoof), still >= 70 % of its peak size, touched at most twice before.
+1. Density: a resting order >= 8x the median level, >= 50k USDT, >= half a minute of turnover (book.py DENS),
+   alive >= 20 s (anti-spoof), still >= 70 % of its peak size, touched at most twice before. Coins whose tick
+   is > 0.02 % of price are skipped (a stop a few ticks wide slips by whole ticks).
 2. Sharp approach: mid moved >= 0.30 % toward the density in the last 60 s and covered >= half of the distance
    it had 60 s ago; it is now within 0.35 % of the density.
 3. The previous move: from the extreme of the last 5 min (the high before a drop onto a bid density, the low
@@ -12,11 +13,15 @@ Long off a bid density (support), short off an ask density (resistance):
    Stop: 0.15 % (>= 2 ticks) behind the density.
    Take: the middle of the previous move (50 % retracement from the density back toward the extreme).
    Skip unless reward >= 1.0 x risk and the risk is 0.10..0.80 % of price.
-5. Exits: stop, take, or a market close after 15 min. No early exit when the density disappears (the lab's
-   forward test lost on exactly that exit, see README) unless P["exit_on_gone"] is set.
+5. Exits, taken in parts: 1/2 at +1 R (tp1; at most half way to the take), 1/3 at the take (tp2), and the last
+   1/6 runs toward the start of the move (run). When the bounce goes (+0.7 R) or tp1 fills the stop moves to
+   break-even (entry + fees); when tp2 fills it moves to tp1. Parts too small for the exchange are merged into
+   tp2 (a small position has one take, as before). A market close after 15 min. No early exit when the density
+   disappears (the lab's forward test lost on exactly that exit, see README) unless P["exit_on_gone"] is set.
 
 A working entry is cancelled when the density goes / shrinks below 50 %, price runs 0.8 % away, or after 3 min.
-Every parameter is in P (overridable with the PARAMS env var, a JSON object); every plan carries its features.
+Every parameter is in P or book.DENS (both overridable with the PARAMS env var, a JSON object); every plan
+carries its features.
 """
 from __future__ import annotations
 
@@ -25,7 +30,7 @@ import math
 import os
 from dataclasses import dataclass, field
 
-from .book import Density, SymbolBook
+from .book import DENS, Density, SymbolBook
 
 P = {
     "min_age": 20.0,          # s a density must live before we trust it
@@ -42,27 +47,32 @@ P = {
     "stop_buf": 0.0015,       # stop 0.15 % (>= 2 ticks) behind the density
     "risk_min": 0.0010, "risk_max": 0.0080,
     "min_rr": 1.0,            # reward / risk at entry
-    "tick_max": 0.0004,       # skip coins whose tick is > 0.04 % of price
+    "tick_max": 0.0002,       # skip coins whose tick is > 0.02 % of price (the screener too)
     "spread_max": 0.0006,
     "cancel_dist": 0.008, "cancel_after": 180.0, "cancel_shrink": 0.5,
     "max_hold": 900.0,        # close at market after 15 min
     "exit_on_gone": False,    # close when the density disappears (off: the stop behind it is the exit)
-    "be_at_r": 0.0,           # > 0: at +be_at_r R move the stop to entry + fees (off by default)
-    "be_off": 0.0006,
+    "be_at_r": 0.7,           # > 0: at +be_at_r R move the stop to entry + fees (0 = only when tp1 fills)
+    "be_off": 0.0006,         # break-even stop = entry + 0.06 % (maker entry + taker stop fees)
+    "tp1_r": 1.0,             # first partial take at +1 R (at most half way to the take) ...
+    "tp1_part": 0.5,          # ... for half of the position
+    "tp2_part": 1 / 3,        # a third at the take (the middle of the move); the rest (1/6) runs
+    "run_frac": 1.0,          # the runner's take: 100 % of the move = back at the move's start
 }
 
 
 def load_params(raw: str | None = None) -> dict:
-    """Apply PARAMS (JSON object) on top of P; unknown keys are an error so a typo never passes silently."""
+    """Apply PARAMS (JSON object) on top of P and book.DENS; unknown keys are an error so a typo never passes."""
     raw = os.environ.get("PARAMS", "") if raw is None else raw
     if not raw.strip():
         return P
     upd = json.loads(raw)
-    bad = sorted(set(upd) - set(P))
+    bad = sorted(set(upd) - set(P) - set(DENS))
     if bad:
-        raise SystemExit(f"PARAMS: unknown keys {bad}; known: {sorted(P)}")
+        raise SystemExit(f"PARAMS: unknown keys {bad}; known: {sorted(P) + sorted(DENS)}")
     for k, v in upd.items():
-        P[k] = type(P[k])(v)
+        d = P if k in P else DENS
+        d[k] = type(d[k])(v)
     return P
 
 
@@ -74,6 +84,8 @@ class Plan:
     tp: float
     dkey: tuple               # (side, tick) of the density
     features: dict = field(default_factory=dict)
+    tp1: float = 0.0          # first partial take (0 = none)
+    tp_run: float = 0.0       # the runner's take (0 = none)
 
     @property
     def risk(self) -> float:
@@ -149,7 +161,14 @@ def plan_bounce(b: SymbolBook, now: float, skip: set) -> Plan | None:
                 "moved60": round(moved, 5), "move": round(move, 5), "move_start": start,
                 "move_s": round(now - start_ts, 1), "risk": round(risk, 5), "reward": round(reward, 5),
                 "rr": round(reward / risk, 2)}
-            best = (dist, Plan("long" if long else "short", entry, stop, tp, (d.side, d.tick), f))
+            # partial takes, rounded toward the entry (a take that is touched but not traded through stays unfilled)
+            tp1_raw = entry + sgn * min(P["tp1_r"] * abs(entry - stop), 0.5 * abs(tp - entry))
+            tp1_t = math.floor(tp1_raw / b.tick_size + 1e-9) if long else math.ceil(tp1_raw / b.tick_size - 1e-9)
+            tp1 = b.p(tp1_t) if 0 < (tp1_t - e_t) * sgn < (tp_t - e_t) * sgn else 0.0
+            run_raw = d.price + sgn * P["run_frac"] * abs(start - d.price)
+            run_t = math.floor(run_raw / b.tick_size + 1e-9) if long else math.ceil(run_raw / b.tick_size - 1e-9)
+            tp_run = b.p(run_t) if (run_t - tp_t) * sgn > 0 else 0.0
+            best = (dist, Plan("long" if long else "short", entry, stop, tp, (d.side, d.tick), f, tp1, tp_run))
     return best[1] if best else None
 
 

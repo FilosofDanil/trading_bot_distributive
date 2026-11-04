@@ -12,6 +12,7 @@ import time
 import httpx
 import websockets
 
+from . import setup
 from .book import SymbolBook
 
 log = logging.getLogger("bounce")
@@ -23,8 +24,7 @@ SCREEN = {
     "n": 16,                    # symbols watched at once (WATCH env)
     "vol_min": 50e6,            # 24h quote volume floor (USDT)
     "vol_max": 3e9,             # skip the giants: their densities are noise relative to the flow
-    "tick_max": 0.0004,
-    "every": 300.0,
+    "every": 300.0,             # the tick limit is setup.P["tick_max"] (the same coins the setup may trade)
     "never": {"BTCUSDT", "ETHUSDT", "USDCUSDT", "FDUSDUSDT", "BTCDOMUSDT"},
 }
 
@@ -54,7 +54,7 @@ def pick(tickers: list[dict], info: dict[str, dict], keep: set[str], exclude: se
         qv, last = float(t["quoteVolume"]), float(t["lastPrice"])
         if not (SCREEN["vol_min"] <= qv <= SCREEN["vol_max"]) or last <= 0:
             continue
-        if info[s]["tick"] / last > SCREEN["tick_max"]:
+        if info[s]["tick"] / last > setup.P["tick_max"]:
             continue
         rows.append((s, qv, abs(float(t["priceChangePercent"]))))
     by_v = {s: i for i, (s, _, _) in enumerate(sorted(rows, key=lambda r: r[1]))}
