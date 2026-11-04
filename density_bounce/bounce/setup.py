@@ -2,22 +2,25 @@
 
 Long off a bid density (support), short off an ask density (resistance):
 
-1. Density: a resting order >= 8x the median level, >= 50k USDT, >= half a minute of turnover (book.py DENS),
+1. Density: a resting order >= 8x the median level, >= 25k USDT, >= half a minute of turnover (book.py DENS),
    alive >= 20 s (anti-spoof), still >= 70 % of its peak size, touched at most twice before. Coins whose tick
-   is > 0.02 % of price are skipped (a stop a few ticks wide slips by whole ticks).
-2. Sharp approach: mid moved >= 0.30 % toward the density in the last 60 s and covered >= half of the distance
-   it had 60 s ago; it is now within 0.35 % of the density.
-3. The previous move: from the extreme of the last 5 min (the high before a drop onto a bid density, the low
-   before a rally into an ask density) to the density; it must be >= 0.50 %.
+   is > 0.02 % of price or that trade < 100k USDT a minute are skipped (the screener also needs 100M USDT a day).
+2. Sharp approach: mid moved >= 0.80 % toward the density in the last 3 min, is still moving (>= 0.15 % in the
+   last 60 s, covering >= half of the distance it had 60 s ago) and is now within 0.35 % of the density.
+3. The previous move: from the extreme of the last 30 min (the high before a drop onto a bid density, the low
+   before a rally into an ask density) to the density; it must be >= 2.50 %.
 4. Entry: post-only limit 0.02 % (>= 1 tick) in front of the density.
    Stop: 0.15 % (>= 2 ticks) behind the density.
-   Take: the middle of the previous move (50 % retracement from the density back toward the extreme).
-   Skip unless reward >= 1.0 x risk and the risk is 0.10..0.80 % of price.
-5. Exits, taken in parts: 1/2 at +1 R (tp1; at most half way to the take), 1/3 at the take (tp2), and the last
-   1/6 runs toward the start of the move (run). When the bounce goes (+0.7 R) or tp1 fills the stop moves to
-   break-even (entry + fees); when tp2 fills it moves to tp1. Parts too small for the exchange are merged into
-   tp2 (a small position has one take, as before). A market close after 15 min. No early exit when the density
-   disappears (the lab's forward test lost on exactly that exit, see README) unless P["exit_on_gone"] is set.
+   Take: the middle of the previous move (50 % retracement from the density back toward the extreme), so a
+   bigger move has a longer take. Skip unless reward >= 1.0 x risk and the risk is 0.10..0.80 % of price.
+5. Exits: the stop, the take for the whole position, or a market close after 60 min. No break-even and no early
+   exit when the density disappears (the lab's forward test lost on exactly that exit, see README) unless
+   P["exit_on_gone"] is set.
+6. Optional, off by default: takes in parts. tp1_frac > 0 takes tp1_part at that fraction of the move and moves the
+   stop to break-even (entry + fees); run_frac > 0 leaves the rest of the position to run to that fraction of the
+   move, and the stop moves to tp1 when the take fills. Parts too small for the exchange are merged into the take.
+
+The thresholds of 1-3 and 5 come from replaying 997 paper fills on 1m klines (README, "Why these thresholds").
 
 A working entry is cancelled when the density goes / shrinks below 50 %, price runs 0.8 % away, or after 3 min.
 Every parameter is in P or book.DENS (both overridable with the PARAMS env var, a JSON object); every plan
@@ -37,12 +40,15 @@ P = {
     "intact": 0.7,            # still >= 70 % of its peak size
     "max_touches": 2,         # 0..2 previous approaches
     "place_dist": 0.0035,     # mid within 0.35 % of the density
-    "impulse_secs": 60.0,     # sharp approach: in the last 60 s ...
-    "impulse_min": 0.0030,    # ... mid moved >= 0.30 % toward the density ...
+    "approach_secs": 180.0,   # sharp approach: in the last 3 min ...
+    "approach_min": 0.0080,   # ... mid moved >= 0.80 % toward the density
+    "impulse_secs": 60.0,     # still moving: in the last 60 s ...
+    "impulse_min": 0.0015,    # ... mid moved >= 0.15 % toward the density ...
     "impulse_frac": 0.5,      # ... and covered >= half of the distance it had 60 s ago
-    "move_secs": 300.0,       # the previous move starts at the extreme of the last 5 min
-    "move_min": 0.0050,       # and is >= 0.50 % long (start -> density)
+    "move_secs": 1800.0,      # the previous move starts at the extreme of the last 30 min
+    "move_min": 0.0250,       # and is >= 2.50 % long (start -> density)
     "take_frac": 0.5,         # take at 50 % of the move, measured from the density
+    "minute_min": 100_000.0,  # skip coins trading < 100k USDT a minute (last 15 min of tape)
     "front": 0.0002,          # entry 0.02 % (>= 1 tick) in front of the density
     "stop_buf": 0.0015,       # stop 0.15 % (>= 2 ticks) behind the density
     "risk_min": 0.0010, "risk_max": 0.0080,
@@ -50,14 +56,14 @@ P = {
     "tick_max": 0.0002,       # skip coins whose tick is > 0.02 % of price (the screener too)
     "spread_max": 0.0006,
     "cancel_dist": 0.008, "cancel_after": 180.0, "cancel_shrink": 0.5,
-    "max_hold": 900.0,        # close at market after 15 min
+    "max_hold": 3600.0,       # close at market after 60 min
     "exit_on_gone": False,    # close when the density disappears (off: the stop behind it is the exit)
-    "be_at_r": 0.7,           # > 0: at +be_at_r R move the stop to entry + fees (0 = only when tp1 fills)
+    "be_at_r": 0.0,           # > 0: at +be_at_r R move the stop to entry + fees (0 = only when tp1 fills)
     "be_off": 0.0006,         # break-even stop = entry + 0.06 % (maker entry + taker stop fees)
-    "tp1_r": 1.0,             # first partial take at +1 R (at most half way to the take) ...
-    "tp1_part": 0.5,          # ... for half of the position
-    "tp2_part": 1 / 3,        # a third at the take (the middle of the move); the rest (1/6) runs
-    "run_frac": 1.0,          # the runner's take: 100 % of the move = back at the move's start
+    "tp1_frac": 0.0,          # > 0: first partial take at this fraction of the move, measured from the density ...
+    "tp1_part": 0.25,         # ... for a quarter of the position
+    "tp2_part": 7 / 12,       # with parts on: the share taken at the take (the middle of the move)
+    "run_frac": 0.0,          # > 0: the rest runs to this fraction of the move (1.0 = back at the move's start)
 }
 
 
@@ -93,13 +99,20 @@ class Plan:
 
 
 def move_start(b: SymbolBook, now: float, secs: float, long: bool) -> tuple[float, float] | None:
-    """(price, ts) of the extreme mid in the last `secs`: the max for a drop (long setup), the min for a rally."""
+    """(price, ts) of the extreme in the last `secs`: the max for a drop (long setup), the min for a rally.
+    The mid samples cover the last minutes, the 1m bars (seeded when a symbol is added) the rest of the window."""
     best = None
     for ts, m in reversed(b.mids):
         if ts < now - secs:
             break
         if best is None or (m > best[0] if long else m < best[0]):
             best = (m, ts)
+    for minute, hi, lo in reversed(b.bars):
+        if minute * 60 < now - secs:
+            break
+        px = hi if long else lo
+        if best is None or (px > best[0] if long else px < best[0]):
+            best = (px, minute * 60.0)
     return best
 
 
@@ -116,7 +129,7 @@ def plan_bounce(b: SymbolBook, now: float, skip: set) -> Plan | None:
     if mid is None or bb is None or ba is None:
         return None
     spread = (ba - bb) * b.tick_size / mid
-    if b.tick_size / mid > P["tick_max"] or spread > P["spread_max"]:
+    if b.tick_size / mid > P["tick_max"] or spread > P["spread_max"] or b.minute_turnover(now) < P["minute_min"]:
         return None
     m_ago = b.mid_ago(now, P["impulse_secs"])
     if m_ago is None:
@@ -135,6 +148,12 @@ def plan_bounce(b: SymbolBook, now: float, skip: set) -> Plan | None:
         moved = (m_ago - mid) / m_ago * sgn                     # toward the density, as a fraction
         dist_ago = (m_ago - d.price) / m_ago * sgn
         if moved < P["impulse_min"] or dist_ago <= 0 or moved < P["impulse_frac"] * dist_ago:
+            continue
+        m_app = b.mid_ago(now, P["approach_secs"])
+        if m_app is None:
+            continue
+        approach = (m_app - mid) / m_app * sgn
+        if approach < P["approach_min"]:
             continue
         st = move_start(b, now, P["move_secs"], long)
         if st is None:
@@ -158,11 +177,11 @@ def plan_bounce(b: SymbolBook, now: float, skip: set) -> Plan | None:
             continue
         if best is None or dist < best[0]:
             f = _features(b, d, now, mid, spread) | {
-                "moved60": round(moved, 5), "move": round(move, 5), "move_start": start,
-                "move_s": round(now - start_ts, 1), "risk": round(risk, 5), "reward": round(reward, 5),
-                "rr": round(reward / risk, 2)}
+                "moved60": round(moved, 5), "approach": round(approach, 5), "move": round(move, 5),
+                "move_start": start, "move_s": round(now - start_ts, 1), "risk": round(risk, 5),
+                "reward": round(reward, 5), "rr": round(reward / risk, 2)}
             # partial takes, rounded toward the entry (a take that is touched but not traded through stays unfilled)
-            tp1_raw = entry + sgn * min(P["tp1_r"] * abs(entry - stop), 0.5 * abs(tp - entry))
+            tp1_raw = d.price + sgn * P["tp1_frac"] * abs(start - d.price)
             tp1_t = math.floor(tp1_raw / b.tick_size + 1e-9) if long else math.ceil(tp1_raw / b.tick_size - 1e-9)
             tp1 = b.p(tp1_t) if 0 < (tp1_t - e_t) * sgn < (tp_t - e_t) * sgn else 0.0
             run_raw = d.price + sgn * P["run_frac"] * abs(start - d.price)

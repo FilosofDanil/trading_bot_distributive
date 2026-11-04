@@ -31,10 +31,12 @@ RISK = {
     "sym_cooldown": 60.0,      # s after a closed trade before the same symbol trades again
     "attempts_per_density": 2,
     "leverage": 2,
+    "fee_rebate": 0.0,         # share of the commission the account gets back (0.4 = 40 %)
 }
 FEE = {"maker": 0.0002, "taker": 0.0005}
 _ENV = {"notional": "NOTIONAL", "max_open": "MAX_OPEN", "day_loss": "DAY_LOSS", "total_loss": "TOTAL_LOSS",
-        "max_consec": "MAX_CONSEC_LOSSES", "max_trades_day": "MAX_TRADES_DAY", "leverage": "LEVERAGE"}
+        "max_consec": "MAX_CONSEC_LOSSES", "max_trades_day": "MAX_TRADES_DAY", "leverage": "LEVERAGE",
+        "fee_rebate": "FEE_REBATE"}
 
 
 def load_risk() -> dict:
@@ -322,11 +324,15 @@ class Trader:
         sgn = 1 if s.plan.side == "long" else -1
         r_usd = abs(s.entry_px - s.plan.stop) * s.filled_qty
         reason = why or s.extra.get("exit_reason", "")
+        rebate = fees * RISK["fee_rebate"]                         # journal and limits count the commission net of it
+        fees -= rebate
+        pnl += rebate
         tr = {"ts_open": round(s.opened_at, 3), "ts_close": round(now, 3), "sym": sym, "side": s.plan.side,
               "entry": s.entry_px, "exit": exit_px, "qty": s.filled_qty,
               "notional": round(s.entry_px * s.filled_qty, 4), "stop": s.plan.stop, "tp": s.plan.tp,
               "reason": reason, "gross": round(sgn * (exit_px - s.entry_px) * s.filled_qty, 6),
-              "fees": round(fees, 6), "pnl": round(pnl, 6), "r": round(pnl / r_usd, 3) if r_usd else None,
+              "fees": round(fees, 6), "rebate": round(rebate, 6), "pnl": round(pnl, 6),
+              "r": round(pnl / r_usd, 3) if r_usd else None,
               "hold_s": round(now - s.opened_at, 1), "features": s.plan.features,
               "parts": [{k: p[k] for k in ("name", "px", "qty", "done", "fill_px")} for p in s.parts]}
         self.store.record_trade(tr)

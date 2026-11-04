@@ -173,7 +173,8 @@ class Runner:
         if why:
             lines.append(f"no new entries: {why}")
         p = setup.P
-        lines.append(f"rules: approach >= {p['impulse_min']:.2%}/{p['impulse_secs']:.0f}s, move >= {p['move_min']:.2%}, "
+        lines.append(f"rules: approach >= {p['approach_min']:.2%}/{p['approach_secs']:.0f}s, "
+                     f"move >= {p['move_min']:.2%}/{p['move_secs'] / 60:.0f}min, "
                      f"stop {p['stop_buf']:.2%} behind, take {p['take_frac']:.0%} of the move, RR >= {p['min_rr']:g}")
         lines.append(f"risk: {RISK['notional']:g} USDT/trade x{RISK['leverage']}, max {RISK['max_open']} at once, "
                      f"day stop -{RISK['day_loss']:g}, total stop -{RISK['total_loss']:g} USDT")

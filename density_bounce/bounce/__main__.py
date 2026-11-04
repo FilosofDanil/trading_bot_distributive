@@ -84,8 +84,9 @@ def serve() -> None:
     p = setup.P
     runner.store.event("info", f"{STRATEGY_ID} v{VERSION} started: mode {runner.mode}, {st['desired']}, "
                                f"{st['totals']['n']} trades so far ({st['totals']['pnl']:+.4f} USDT); "
-                               f"{RISK['notional']:g} USDT/trade, approach >= {p['impulse_min']:.2%}/"
-                               f"{p['impulse_secs']:.0f}s, take {p['take_frac']:.0%} of the move", True)
+                               f"{RISK['notional']:g} USDT/trade, approach >= {p['approach_min']:.2%}/"
+                               f"{p['approach_secs']:.0f}s, move >= {p['move_min']:.2%}/{p['move_secs'] / 60:.0f}min, "
+                               f"take {p['take_frac']:.0%} of the move", True)
     runner.start()
     print(f"density-bounce: API on [::]:{port}, state {runner.store.path}", flush=True)
     srv.serve_forever()

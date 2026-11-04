@@ -14,7 +14,7 @@ DENS = {
     "band": 0.015,        # look for densities within 1.5 % of mid
     "base_band": 0.02,    # baseline = median level notional within 2 % of mid on that side
     "ratio": 8.0,         # density >= 8 x the median level
-    "usd_min": 50_000.0,  # and >= 50k USDT (25k until 2026-11-04)
+    "usd_min": 25_000.0,  # and >= 25k USDT (50k in v0.2.0: the replay in the README earned less with it)
     "minute_k": 0.5,      # and >= half the average traded USDT per minute (last 15 min of tape)
     "gone_frac": 0.30,    # a density with < 30 % of its peak size left is gone
 }
@@ -60,6 +60,7 @@ class SymbolBook:
     snapshot_id: int | None = None
     trades: deque = field(default_factory=lambda: deque(maxlen=50_000))
     mids: deque = field(default_factory=lambda: deque(maxlen=2_400))      # (ts, mid) every >= 0.25 s
+    bars: deque = field(default_factory=lambda: deque(maxlen=240))        # [minute, high, low] of traded prices
     densities: dict[tuple[str, int], Density] = field(default_factory=dict)
     last_ts: float = 0.0
     cum_at: dict[int, list] = field(default_factory=dict)                # tick -> [buy qty, sell qty] cumulative
@@ -121,14 +122,30 @@ class SymbolBook:
         self.last_ts = max(self.last_ts, tr.ts)
         cum = self.cum_at.setdefault(tr.tick, [0.0, 0.0])          # [aggressive buys, aggressive sells]
         cum[1 if tr.buyer_maker else 0] += tr.qty
-        usd = tr.qty * tr.tick * self.tick_size
+        px = tr.tick * self.tick_size
+        usd = tr.qty * px
         self.turn_q.append((tr.ts, usd))
         self.turn_sum += usd
         self._prune_turn(tr.ts)
+        self._bar(tr.ts, px)
 
     def _prune_turn(self, now: float) -> None:
         while self.turn_q and self.turn_q[0][0] < now - 900:
             self.turn_sum -= self.turn_q.popleft()[1]
+
+    def _bar(self, ts: float, px: float) -> None:
+        m = int(ts // 60)
+        if self.bars and self.bars[-1][0] == m:
+            bar = self.bars[-1]
+            bar[1], bar[2] = max(bar[1], px), min(bar[2], px)
+        elif not self.bars or m > self.bars[-1][0]:
+            self.bars.append([m, px, px])
+
+    def seed_bars(self, klines: list) -> None:
+        """Put 1m klines ([open ms, open, high, low, ...]) older than our own tape in front of the bars."""
+        first = self.bars[0][0] if self.bars else None
+        old = [[int(k[0]) // 60_000, float(k[2]), float(k[3])] for k in klines]
+        self.bars.extendleft(reversed([b for b in old if first is None or b[0] < first]))
 
     def cum(self, tick: int, aggressor: str | None = None) -> float:
         """Cumulative qty traded at `tick` since the stream started (both sides or one aggressor)."""

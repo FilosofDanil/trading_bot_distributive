@@ -6,4 +6,4 @@ density, take profit at the middle of the move that brought price there. Control
 RUNNER = "bounce"
 STRATEGY_ID = "bounce.density"
 STRATEGY_NAME = "Density bounce (sharp approach, stop behind the wall, take at 50 % of the move)"
-VERSION = "0.2.0"
+VERSION = "0.3.0"

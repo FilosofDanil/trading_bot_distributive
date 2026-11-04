@@ -22,7 +22,7 @@ WS = "wss://fstream.binance.com"
 
 SCREEN = {
     "n": 16,                    # symbols watched at once (WATCH env)
-    "vol_min": 50e6,            # 24h quote volume floor (USDT)
+    "vol_min": 100e6,           # 24h quote volume floor (USDT; 50e6 until v0.3.0)
     "vol_max": 3e9,             # skip the giants: their densities are noise relative to the flow
     "every": 300.0,             # the tick limit is setup.P["tick_max"] (the same coins the setup may trade)
     "never": {"BTCUSDT", "ETHUSDT", "USDCUSDT", "FDUSDUSDT", "BTCDOMUSDT"},
@@ -104,9 +104,19 @@ class Feed:
                 self.trader.books.pop(s, None)
         for s in want:
             if s not in self.tasks:
-                self.trader.books[s] = SymbolBook(s, self.trader.info[s]["tick"])
-                self.tasks[s] = asyncio.get_event_loop().create_task(self.run_symbol(s))
+                b = self.trader.books[s] = SymbolBook(s, self.trader.info[s]["tick"])
+                loop = asyncio.get_event_loop()
+                loop.create_task(self._seed(b))
+                self.tasks[s] = loop.create_task(self.run_symbol(s))
         self.watching = sorted(self.tasks)
+
+    async def _seed(self, b: SymbolBook) -> None:
+        """The last hour of 1m bars, so a move that began before the symbol was added is measured whole.
+        Without them the bars only fill from the tape: the move looks smaller and the setup just stays out."""
+        try:
+            b.seed_bars(await self.get("/fapi/v1/klines", symbol=b.symbol, interval="1m", limit=60))
+        except Exception as e:
+            log.warning("%s klines: %r", b.symbol, e)
 
     def _spawn_snapshot(self, b: SymbolBook) -> None:
         if b.symbol not in self.inflight:

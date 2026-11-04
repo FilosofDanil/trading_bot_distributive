@@ -136,4 +136,19 @@ win 10.9 %; 604 "density_gone" exits = 0 % win -> the owner's rules drop that ex
       -4130 (one closePosition stop per side), the rest stopped at the initial stop, labelled stop_be
 - [x] fix: move_stop cancels the old stop first, restores it if the new one fails, closes if neither can be placed;
       stop_be / stop_lock only after a move that reached the exchange; fake exchange models -4130; 42 pytest pass
-- [ ] deploy the fix; check the log "stop -> ... (stop_be)", no -4130, and a real stop_be / stop_lock exit near its stop
+- [x] deploy the fix: deployment d2630d95 (103758d) SUCCESS 2026-11-04 16:53 UTC, mode live
+- [ ] check the log "stop -> ... (stop_be)", no -4130, and a real stop_be / stop_lock exit near its stop (no trade has
+      moved its stop since the fix: UNI and ZEC longs stopped out without reaching a part)
+- [x] Owner 2026-11-04: rework the signal (illiquid coins, short windows and takes, noisy trades). Study: 997 paper
+      fills + 45 live trades replayed on 1m klines (density_bounce/README.md, "Why these thresholds")
+- [x] bounce v0.3.0 in the working tree, not committed: move >= 2.5 % / 30 min, approach >= 0.8 % / 3 min, 100M a day and
+      100k a minute floors, 1m bars seeded from klines, parts 1/4 at 25 % / 7/12 at 50 % / 1/6 at 100 % of the move,
+      break-even only on tp1, 60 min hold; 50 pytest pass; 5 min paper smoke on the public feed: 16 synced, no errors
+- [ ] Owner: commit and push v0.3.0 (pause in Telegram first, wait 3 min for working entries, resume after the deploy)
+- [ ] after the deploy: log "v0.3.0 started: mode live", `watching 16`, first trades; judge after about 40 trades
+- [x] Owner 2026-11-04: the most profitable variant of the replay: density >= 25k, one take at 50 % of the move; parts,
+      runner and break-even off by default (PARAMS tp1_frac, run_frac turn them on); 52 pytest pass
+- [x] Owner 2026-11-04: MAX_CONSEC_LOSSES=20 set on Railway without a redeploy (applies with the v0.3.0 deploy)
+- [x] Owner 2026-11-04: 40 % of the commission comes back: FEE_REBATE in the journal, reports and limits (new trades
+      only), FEE_REBATE=0.4 set on Railway without a redeploy; replay table recalculated; 53 pytest pass
+- [ ] after the deploy: first closed trade shows fees at 60 %; owner compares with the rebate actually received

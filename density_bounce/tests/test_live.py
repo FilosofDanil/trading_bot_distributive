@@ -79,7 +79,7 @@ def test_takes_one_reduce_only_order_per_part(tmp_path):
             task.cancel()
     asyncio.run(go())
     takes = [p for m, path, p in rest.calls if path == "/fapi/v1/order" and m == "POST"]
-    assert [(o["price"], o["quantity"]) for o in takes] == [("1.0019", "29"), ("1.0050", "21"), ("1.0100", "9")]
+    assert [(o["price"], o["quantity"]) for o in takes] == [("1.0019", "14"), ("1.0050", "36"), ("1.0100", "9")]
     assert all(o["reduceOnly"] == "true" for o in takes)
     assert t.store.data["slots"]["XUSDT"]["tp_ids"] == [p["id"] for p in s.parts]
 
@@ -90,8 +90,8 @@ def test_poll_reports_parts_and_cancels_the_rest(tmp_path, monkeypatch):
     s = open_slot(t, 59.0)
     for p, cid in zip(s.parts, ("t1", "t2", "t3")):
         p["id"] = cid
-    rest.orders["t1"] = {"status": "FILLED", "executedQty": "29", "avgPrice": "1.0019"}
-    rest.pos_seq = [59.0, 30.0, 30.0, 0.0, 0.0]                      # tp1 fills, then the stop closes the rest
+    rest.orders["t1"] = {"status": "FILLED", "executedQty": "14", "avgPrice": "1.0019"}
+    rest.pos_seq = [59.0, 45.0, 45.0, 0.0, 0.0]                      # tp1 fills, then the stop closes the rest
     sleep = asyncio.sleep
     monkeypatch.setattr("bounce.live.asyncio.sleep", lambda _: sleep(0))
     asyncio.run(b._poll_open(s))
