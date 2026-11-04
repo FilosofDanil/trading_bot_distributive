@@ -137,8 +137,9 @@ class Trader:
         today = d["days"].get(day, {})
         if today.get("pnl", 0.0) <= -RISK["day_loss"]:
             return f"day loss {today['pnl']:.2f} <= -{RISK['day_loss']:g} USDT"
-        if d.get("consec_block_day") == day:
-            return f"{RISK['max_consec']} losses in a row today"
+        limit = d.get("consec_block_limit", 0)       # raising MAX_CONSEC_LOSSES lifts a block set under a lower limit
+        if d.get("consec_block_day") == day and limit >= RISK["max_consec"]:
+            return f"{limit} losses in a row today"
         if today.get("n", 0) >= RISK["max_trades_day"]:
             return f"{RISK['max_trades_day']} trades today"
         return ""
@@ -333,6 +334,7 @@ class Trader:
         d = self.store.data
         if d["consec_losses"] >= RISK["max_consec"]:
             self.store.set("consec_block_day", utc_day(now))
+            self.store.set("consec_block_limit", RISK["max_consec"])
             self.store.set("consec_losses", 0)
         self.cool[sym] = now + RISK["sym_cooldown"]
         icon = "✅" if pnl > 0 else "❌"

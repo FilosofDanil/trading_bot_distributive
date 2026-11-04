@@ -128,4 +128,8 @@ win 10.9 %; 604 "density_gone" exits = 0 % win -> the owner's rules drop that ex
 - [x] Owner 2026-11-04: bounce v0.2.0 - density >= 50k USDT, tick <= 0.02 % (setup + screener), takes in parts
       1/2 at +1 R, 1/3 at the take, 1/6 runner to the move start; break-even at +0.7 R or tp1, runner stop at tp1
       after tp2; book.DENS overridable via PARAMS; 37 pytest pass
-- [ ] deploy v0.2.0, check "v0.2.0 started: mode live" and the first "parts" in a closed trade
+- [x] deploy v0.2.0: deployment 77117247 (24a11be) SUCCESS 2026-11-04 11:49 UTC, log "v0.2.0 started: mode live,
+      running, 45 trades (-3.3431)", watching 16 (no coarse-tick coins), no leftovers to close
+- [x] Owner 2026-11-04: MAX_CONSEC_LOSSES=12 and unblock today's entries: the block now keeps the limit it was set
+      under (`consec_block_limit`), raising the limit lifts it; 38 pytest pass
+- [ ] the first closed trade with "parts" (tp1 / break-even / runner) in the log

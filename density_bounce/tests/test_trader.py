@@ -172,6 +172,26 @@ def test_pause_and_risk_blocks(tmp_path):
     assert not t.slots and "halted" in t.halt
 
 
+def test_raising_the_consec_limit_lifts_todays_block(tmp_path, monkeypatch):
+    monkeypatch.setitem(RISK, "max_consec", 1)
+    t, broker, store = make(tmp_path)
+
+    async def go():
+        await open_long(t, broker)
+        broker.on_trade("XUSDT", Trade(NOW + 5, 9985, 50.0, True))      # the stop: one loss hits the limit of 1
+        await settle()
+    asyncio.run(go())
+    assert store.data["consec_block_limit"] == 1
+    store.data["consec_block_day"] = utc_day(NOW)                       # the trade closed on the wall clock's day
+    assert t.block(NOW) == "1 losses in a row today"
+    monkeypatch.setitem(RISK, "max_consec", 12)
+    assert t.block(NOW) == ""
+    monkeypatch.setitem(RISK, "max_consec", 1)                          # same limit after a restart: still blocked
+    assert "in a row" in t.block(NOW)
+    del store.data["consec_block_limit"]                                # a block recorded before the limit was kept
+    assert t.block(NOW) == ""
+
+
 def test_flatten_closes_open_trade(tmp_path):
     t, broker, store = make(tmp_path)
 
