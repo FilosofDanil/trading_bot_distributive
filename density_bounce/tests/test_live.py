@@ -6,7 +6,7 @@ import hmac
 
 import pytest
 
-from bounce.live import PREFIX, LiveBroker, Rest, check, close_own_position
+from bounce.live import PREFIX, BinanceError, LiveBroker, Rest, check, close_own_position
 from bounce.setup import Plan
 from bounce.state import Store
 from bounce.trader import Slot, Trader
@@ -21,6 +21,8 @@ class FakeRest:
         self.pos = {}
         self.orders = {}                       # client id -> GET /fapi/v1/order answer
         self.pos_seq = []                      # scripted positionAmt readings for XUSDT (then self.pos)
+        self.stops = {}                        # open algo stops: client id -> trigger price
+        self.stop_errors = []                  # errors for the next POST /fapi/v1/algoOrder calls
 
     async def sync_time(self):
         pass
@@ -36,7 +38,15 @@ class FakeRest:
         if key == "GET /fapi/v1/order":
             return self.orders.get(p["origClientOrderId"], {"status": "NEW", "executedQty": "0"})
         if key == "POST /fapi/v1/algoOrder":
+            if self.stop_errors:
+                raise self.stop_errors.pop(0)
+            if self.stops:                                 # like Binance: one closePosition stop per side
+                raise BinanceError(-4130, "An open stop or take profit order with GTE and closePosition is existing")
+            self.stops[p["clientAlgoId"]] = p["triggerPrice"]
             return {"algoStatus": "NEW"}
+        if key == "DELETE /fapi/v1/algoOrder":
+            self.stops.pop(p["clientAlgoId"], None)
+            return {}
         if key == "GET /fapi/v1/exchangeInfo":
             return {"symbols": [{"symbol": "XUSDT", "filters": [{"filterType": "LOT_SIZE", "stepSize": "1"}]}]}
         return self.answers.get(key, {} if method != "GET" else [])
@@ -89,6 +99,57 @@ def test_poll_reports_parts_and_cancels_the_rest(tmp_path, monkeypatch):
     assert tr["reason"] == "stop" and [p["done"] for p in tr["parts"]] == [True, False, False]
     cancelled = {p["origClientOrderId"] for m, path, p in rest.calls if m == "DELETE" and path == "/fapi/v1/order"}
     assert cancelled == {"t2", "t3"}
+
+
+def stopped_slot(rest, t):
+    s = open_slot(t, 59.0)
+    s.stop = s.plan.stop
+    s.extra["stop_id"] = "old"
+    rest.stops["old"] = "0.9985"
+    return s
+
+
+def test_move_stop_replaces_the_only_close_position_stop(tmp_path):
+    rest = FakeRest()
+    b, t = broker_with(rest, tmp_path)
+    s = stopped_slot(rest, t)
+    asyncio.run(t._move_stop(s, 1.0008, "stop_be"))
+    assert list(rest.stops.values()) == ["1.0008"] and s.extra["stop_id"] in rest.stops
+    assert s.stop == 1.0008 and s.extra["stop_why"] == "stop_be"
+    assert t.store.data["slots"]["XUSDT"]["stop_id"] == s.extra["stop_id"]
+
+
+def test_move_stop_failure_restores_the_old_stop(tmp_path):
+    rest = FakeRest()
+    b, t = broker_with(rest, tmp_path)
+    s = stopped_slot(rest, t)
+    rest.stop_errors = [BinanceError(-1008, "overloaded")]
+    asyncio.run(t._move_stop(s, 1.0008, "stop_be"))
+    assert list(rest.stops.values()) == ["0.9985"] and not s.close_sent
+    assert s.stop == s.plan.stop and "stop_why" not in s.extra       # a later stop-out is the initial stop
+    assert any("move stop" in e["msg"] for e in t.store.data["events"])
+
+
+def test_move_stop_closes_when_no_stop_can_be_placed(tmp_path):
+    rest = FakeRest()
+    b, t = broker_with(rest, tmp_path)
+    s = stopped_slot(rest, t)
+    rest.pos["XUSDT"] = 59.0
+    rest.stop_errors = [BinanceError(-1008, "overloaded"), BinanceError(-1008, "overloaded")]
+    asyncio.run(t._move_stop(s, 1.0008, "stop_be"))
+    assert s.close_sent and s.extra["exit_reason"] == "stop_lost"
+    market = next(p for m, path, p in rest.calls if m == "POST" and p.get("type") == "MARKET")
+    assert market["side"] == "SELL" and market["reduceOnly"] == "true"
+
+
+def test_move_stop_past_the_price_closes_at_market(tmp_path):
+    rest = FakeRest()
+    b, t = broker_with(rest, tmp_path)
+    s = stopped_slot(rest, t)
+    rest.pos["XUSDT"] = 59.0
+    rest.stop_errors = [BinanceError(-2021, "would immediately trigger")]
+    asyncio.run(t._move_stop(s, 1.0008, "stop_be"))
+    assert s.close_sent and s.extra["exit_reason"] == "stop_be" and not rest.stops
 
 
 def test_protect_places_exchange_stop_and_reduce_only_take(tmp_path):

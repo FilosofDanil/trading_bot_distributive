@@ -371,11 +371,24 @@ class LiveBroker:
                 log.warning("take check %s %s: %r", s.sym, p["name"], e)
 
     async def move_stop(self, s: Slot, price: float) -> None:
-        new_id = await self._place_stop(s, price)            # new stop first, so the position is never naked
-        old = s.extra.get("stop_id")
-        s.extra["stop_id"] = new_id
+        # Binance keeps one closePosition stop per side (-4130), so the old one goes first; if the new one fails, the
+        # old one comes back, and if that fails too the position is closed: it never stays without a stop
+        old_px = s.stop or s.plan.stop
+        await self._cancel_algo(s.extra.get("stop_id"))
+        try:
+            s.extra["stop_id"] = await self._place_stop(s, price)
+        except Exception as e:
+            code = getattr(e, "code", None)
+            if code == -4130:                                  # the cancel failed: the old stop still stands
+                raise
+            try:
+                s.extra["stop_id"] = await self._place_stop(s, old_px) if code != -2021 else ""
+            except Exception as e2:
+                log.warning("%s stop not restored (%r): closing", s.sym, e2)
+                await self.trader.close(s, "stop_lost")
+            self.save_state()
+            raise                                              # -2021: price is past the new stop, the trader closes
         self.save_state()
-        await self._cancel_algo(old)
 
     async def close(self, s: Slot, why: str) -> None:
         i = self.trader.info[s.sym]

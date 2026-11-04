@@ -66,10 +66,8 @@ class Slot:
 
 
 def stop_reason(s: Slot) -> str:
-    """The name of a stop-out: after the runner lock, after break-even, or the initial stop."""
-    if s.extra.get("lock_done"):
-        return "stop_lock"
-    return "stop_be" if s.manage and s.manage.be_done else "stop"
+    """The name of a stop-out, from the last stop move that reached the exchange: stop_lock, stop_be or stop."""
+    return s.extra.get("stop_why", "stop")
 
 
 class Trader:
@@ -237,6 +235,7 @@ class Trader:
         try:
             await self.broker.move_stop(s, px)
             s.stop = px
+            s.extra["stop_why"] = why
             log.info("%s stop -> %g (%s)", s.sym, px, why)
         except Exception as e:
             if getattr(e, "code", None) == -2021:                 # price is already past the new stop

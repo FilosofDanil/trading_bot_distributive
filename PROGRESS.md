@@ -132,4 +132,8 @@ win 10.9 %; 604 "density_gone" exits = 0 % win -> the owner's rules drop that ex
       running, 45 trades (-3.3431)", watching 16 (no coarse-tick coins), no leftovers to close
 - [x] Owner 2026-11-04: MAX_CONSEC_LOSSES=12 and unblock today's entries: the block now keeps the limit it was set
       under (`consec_block_limit`), raising the limit lifts it; 38 pytest pass
-- [ ] the first closed trade with "parts" (tp1 / break-even / runner) in the log
+- [x] first live trade with parts (ZEC short 2026-11-04 16:09 UTC): split and tp1 work; the stop move failed with
+      -4130 (one closePosition stop per side), the rest stopped at the initial stop, labelled stop_be
+- [x] fix: move_stop cancels the old stop first, restores it if the new one fails, closes if neither can be placed;
+      stop_be / stop_lock only after a move that reached the exchange; fake exchange models -4130; 42 pytest pass
+- [ ] deploy the fix; check the log "stop -> ... (stop_be)", no -4130, and a real stop_be / stop_lock exit near its stop
