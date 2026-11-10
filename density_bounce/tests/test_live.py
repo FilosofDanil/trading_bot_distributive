@@ -6,10 +6,16 @@ import hmac
 
 import pytest
 
+from bounce import setup
 from bounce.live import PREFIX, BinanceError, LiveBroker, Rest, check, close_own_position
 from bounce.setup import Plan
 from bounce.state import Store
 from bounce.trader import Slot, Trader
+
+
+@pytest.fixture(autouse=True)
+def three_parts(monkeypatch):
+    monkeypatch.setitem(setup.P, "tp1_part", 0.25)               # the slots below have tp1 / tp2 / run (v0.2.0)
 
 
 class FakeRest:

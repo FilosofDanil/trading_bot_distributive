@@ -1,4 +1,5 @@
 import asyncio
+import time
 
 import pytest
 
@@ -6,7 +7,7 @@ from bounce import setup
 from bounce.book import Trade
 from bounce.sim import SimBroker
 from bounce.state import Store, utc_day
-from bounce.trader import RISK, Trader
+from bounce.trader import RISK, Slot, Trader
 from tests.helpers import long_book
 
 NOW = 1000.0
@@ -15,7 +16,11 @@ INFO = {"XUSDT": {"tick": 0.0001, "step": 1.0, "min_qty": 1.0, "min_notional": 5
 
 @pytest.fixture
 def parts(monkeypatch):
+    """v0.2.0 parts: a quarter at 25 % of the move, break-even when it fills, a runner back to the move's start."""
+    monkeypatch.setitem(setup.P, "tp1_r", 0.0)
     monkeypatch.setitem(setup.P, "tp1_frac", 0.25)
+    monkeypatch.setitem(setup.P, "tp1_part", 0.25)
+    monkeypatch.setitem(setup.P, "be_on_tp1", True)
     monkeypatch.setitem(setup.P, "run_frac", 1.0)
 
 
@@ -58,6 +63,7 @@ async def open_big_long(t, broker):
 
 def test_one_take_for_the_whole_position_and_no_stop_move(tmp_path, monkeypatch):
     monkeypatch.setitem(RISK, "notional", 60.0)
+    monkeypatch.setitem(setup.P, "tp1_r", 0.0)                          # v0.3.0: no part at +1R
     t, broker, store = make(tmp_path)
     b = t.books["XUSDT"]                                                 # mid 1.0030 = +1.65 R
 
@@ -150,6 +156,69 @@ def test_partial_then_initial_stop(tmp_path, monkeypatch, parts):
     assert tr["reason"] == "stop" and tr["pnl"] == pytest.approx(gross - fees, abs=1e-6)
 
 
+def test_half_at_one_r_and_the_stop_stays(tmp_path, monkeypatch):
+    monkeypatch.setitem(RISK, "notional", 60.0)
+    t, broker, store = make(tmp_path)
+    b = t.books["XUSDT"]
+
+    async def go():
+        await t._seek("XUSDT", b, NOW)
+        s = t.slots["XUSDT"]
+        broker.on_trade("XUSDT", Trade(NOW + 1, 10001, 100.0, True))
+        await settle()
+        assert [(p["name"], p["qty"], p["px"]) for p in s.parts] == [("tp1", 29, 1.0019), ("tp2", 30, 1.0200)]
+        broker.on_trade("XUSDT", Trade(NOW + 5, 10020, 50.0, False))     # through tp1 at +1R
+        await settle()
+        await t._watch_open(s, b, NOW + 5)
+        assert s.parts[0]["done"] and not s.manage.be_done and broker.o["XUSDT"]["stop"] == 9985   # no break-even
+        broker.on_trade("XUSDT", Trade(NOW + 9, 9985, 50.0, True))       # the rest stops out where it started
+        await settle()
+    asyncio.run(go())
+    tr = store.data["trades"][-1]
+    stop_px = 0.9985 * (1 - 0.0002)
+    gross = 29 * (1.0019 - 1.0002) + 30 * (stop_px - 1.0002)
+    fees = 59 * 1.0002 * 0.0002 + 29 * 1.0019 * 0.0002 + 30 * stop_px * 0.0005
+    assert tr["reason"] == "stop" and tr["pnl"] == pytest.approx(gross - fees, abs=1e-6)
+    assert tr["slip"] is None                                            # the exit price averages in the part
+
+
+def test_size_keeps_the_usdt_risk(tmp_path, monkeypatch):
+    t, broker, store = make(tmp_path)
+    monkeypatch.setitem(RISK, "notional", 60.0)
+    assert t.size("XUSDT", 1.0002, 0.9985) == 59.0                      # default risk 0.12 USDT: the notional caps it
+    monkeypatch.setitem(RISK, "risk_usd", 0.05)
+    assert t.size("XUSDT", 1.0002, 0.9985) == 29.0                      # 0.05 USDT / 0.17 % = 29.4 USDT
+    assert t.size("XUSDT", 1.0002, 0.9902) == 5.0                       # 1 % stop: 5 USDT (the exchange minimum)
+    assert t.size("XUSDT", 1.0002) == 59.0                              # no stop: the notional
+
+
+def test_no_entry_when_the_book_behind_the_stop_is_thin(tmp_path):
+    t, broker, store = make(tmp_path)
+    t.books["XUSDT"] = long_book(NOW, depth=1.0)                        # 7 units within 0.3 % beyond the stop < 3 x 9
+    asyncio.run(t._seek("XUSDT", t.books["XUSDT"], NOW))
+    assert not t.slots and store.data["stats"]["thin_stop"] == 1 and t.cool["XUSDT"] == NOW + 30
+    t.cool.clear()
+    t.books["XUSDT"] = long_book(NOW, depth=4.0)                        # 28 >= 27
+    asyncio.run(t._seek("XUSDT", t.books["XUSDT"], NOW))
+    assert t.slots["XUSDT"].plan.features["depth_x"] == pytest.approx(3.1, abs=0.05)
+
+
+def test_two_slipped_stops_ban_the_symbol_for_a_day(tmp_path):
+    t, broker, store = make(tmp_path)
+
+    def stopped(exit_px):
+        t.slots["XUSDT"] = Slot("XUSDT", setup.Plan("long", 1.0002, 0.9985, 1.0200, ("bid", 10000)), 9.0,
+                                state="open", filled_qty=9.0, entry_px=1.0002, opened_at=time.time(), stop=0.9985)
+        t.on_closed("XUSDT", exit_px, -0.05, 0.01, "stop")
+        return store.data["trades"][-1]
+    assert stopped(0.9980)["slip"] == pytest.approx(0.0005, abs=1e-5)  # 0.05 %: an ordinary fill
+    assert stopped(0.9950)["slip"] == pytest.approx(0.0035 / 0.9985, abs=1e-5)   # 0.35 %: the first slip
+    assert t.cool["XUSDT"] < time.time() + 120
+    stopped(0.9950)                                                      # the second within 24 h: banned
+    assert t.cool["XUSDT"] > time.time() + 86_000
+    assert any("no trades on it for 24 h" in e["msg"] for e in store.data["events"])
+
+
 def test_take_at_middle_of_the_move(tmp_path):
     t, broker, store = make(tmp_path)
 
@@ -181,6 +250,7 @@ def test_stop_behind_the_density(tmp_path):
     pnl = 9 * (exit_px - 1.0002) - 9 * 1.0002 * 0.0002 - 9 * exit_px * 0.0005
     assert tr["exit"] == pytest.approx(exit_px) and tr["pnl"] == pytest.approx(pnl, abs=1e-6)
     assert tr["r"] == pytest.approx(pnl / (9 * 0.0017), abs=0.01)     # about -1.5 R: fees + slippage add ~0.5 R
+    assert tr["slip"] == pytest.approx(0.0002, abs=1e-6)
     assert store.data["consec_losses"] == 1
 
 

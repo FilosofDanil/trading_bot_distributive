@@ -22,7 +22,7 @@ from . import STRATEGY_ID, VERSION, setup
 from .api import env_token, make_server
 from .runner import Runner
 from .state import Store
-from .trader import RISK, load_risk
+from .trader import RISK, load_risk, risk_usd
 
 
 def _runner() -> Runner:
@@ -84,9 +84,10 @@ def serve() -> None:
     p = setup.P
     runner.store.event("info", f"{STRATEGY_ID} v{VERSION} started: mode {runner.mode}, {st['desired']}, "
                                f"{st['totals']['n']} trades so far ({st['totals']['pnl']:+.4f} USDT); "
-                               f"{RISK['notional']:g} USDT/trade, approach >= {p['approach_min']:.2%}/"
-                               f"{p['approach_secs']:.0f}s, move >= {p['move_min']:.2%}/{p['move_secs'] / 60:.0f}min, "
-                               f"take {p['take_frac']:.0%} of the move", True)
+                               f"{risk_usd():g} USDT a stop, <= {RISK['notional']:g} USDT/trade, approach >= "
+                               f"{p['approach_min']:.2%}/{p['approach_secs']:.0f}s, move >= {p['move_min']:.2%}/"
+                               f"{p['move_secs'] / 60:.0f}min, stop max({p['stop_buf']:.2%}, {p['stop_atr']:g} x ATR), "
+                               f"{p['tp1_part']:.0%} at +{p['tp1_r']:g}R, take {p['take_frac']:.0%} of the move", True)
     runner.start()
     print(f"density-bounce: API on [::]:{port}, state {runner.store.path}", flush=True)
     srv.serve_forever()

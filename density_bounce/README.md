@@ -12,14 +12,17 @@ so `control` manages it from Telegram like `funding_carry`. **Paper mode by defa
 | density | resting order ≥ 8× the median level, ≥ 25k USDT (50k in v0.2.0), ≥ ½ minute of turnover (`bounce/book.py` `DENS`, the lab's detector); alive ≥ 20 s, still ≥ 70 % of its peak, touched ≤ 2 times |
 | sharp approach | mid moved ≥ 0.80 % toward the density in the last 3 min, is still moving (≥ 0.15 % in the last 60 s, covering ≥ half of the distance it had 60 s ago); now within 0.35 % of it |
 | previous move | from the extreme of the last 30 min (the high before a drop onto a bid wall, the low before a rally into an ask wall; 1m bars, the last hour is seeded when a symbol is added) to the density, ≥ 2.50 % |
+| **entry quality** (v0.4.0) | pumping coins are traded, the entry has to be good: against the 1h trend (last price on the other side of the EMA20 of the hour closes; 48 h seeded when a symbol is added) only with **accel ≥ 1** — the speed of the last 3 min ≥ the average speed over 30 min (`counter_accel`), at placement and until the fill. A density that lost ≥ 20 % of its size in 10 s is being eaten: no entry (`eat_cancel`) |
 | entry | post-only limit 0.02 % (≥ 1 tick) in front of the density |
-| **stop** | **0.15 % (≥ 2 ticks) behind the density** |
+| **stop** | **max(0.15 %, 2 × ATR(14) of the 1m bars) behind the density** (≥ 2 ticks; `stop_buf`, `stop_atr`; 0.15 % only until v0.4.0) |
+| **size** | **a fixed USDT risk** (`RISK_USD`): qty = risk / stop distance, at most `NOTIONAL`. A wide stop is a smaller position |
 | **take** | **the middle of the previous move** (50 % retracement from the density back toward the extreme) |
-| filters | ≥ 100k USDT traded a minute (last 15 min of tape; `minute_min`) and ≥ 100M a day (the screener, 50M until v0.3.0), reward ≥ 1.0 × risk, risk 0.10–0.80 % of price, tick ≤ 0.02 % of price (the screener too; 0.04 % until 2026-11-04: AKE at 2.5–3.3 bp lost 6 of 6), spread ≤ 0.06 % |
-| parts | the whole position goes at the take: parts are off (`tp1_frac` 0, `run_frac` 0). With `PARAMS={"tp1_frac":0.25,"run_frac":1.0}`: ¼ at 25 % of the move (`tp1`), 7/12 at the take (`tp2`), the last ⅙ runs to the start of the move (`run`); a part too small for the exchange is merged into `tp2` |
-| break-even | off with one take. With parts: when `tp1` fills the stop moves to entry + 0.06 % (fees); when `tp2` fills it moves to `tp1` for the runner. `be_at_r` > 0 also moves it at that many R |
-| exits | stop (`stop`; with parts also `stop_be`, `stop_lock`), `take`, or market close after 60 min. No exit when the density disappears (`exit_on_gone`, off) |
-| entry cancel | density gone / below 50 % of its peak, price 0.8 % away, or 3 min without a fill |
+| filters | ≥ 100k USDT traded a minute (last 15 min of tape; `minute_min`) and ≥ 100M a day (the screener, 50M until v0.3.0), reward ≥ 1.0 × risk, risk 0.10–4 % of price (0.80 % until v0.4.0), tick ≤ 0.02 % of price (the screener too; 0.04 % until 2026-11-04: AKE at 2.5–3.3 bp lost 6 of 6), spread ≤ 0.06 %, the book within 0.3 % beyond the stop ≥ 3 × the position (`stop_depth_k`) |
+| parts | **½ at +1R** (`tp1`; `tp1_r`, `tp1_part`), the rest at the take (`tp2`). With `PARAMS={"tp1_r":0,"tp1_frac":0.25,"tp1_part":0.25,"run_frac":1.0,"be_on_tp1":true}` the v0.2.0 parts: ¼ at 25 % of the move, 7/12 at the take, the last ⅙ runs to the start of the move (`run`); a part too small for the exchange is merged into `tp2` |
+| break-even | **off**: the stop stays where it was when `tp1` fills (the owner's note "break-even too early"). `be_on_tp1` moves it to entry + 0.06 % (fees) when `tp1` fills; with a runner it moves to `tp1` when `tp2` fills; `be_at_r` > 0 moves it at that many R |
+| exits | stop (`stop`; with break-even also `stop_be`, `stop_lock`), `take`, or market close after 60 min. No exit when the density disappears (`exit_on_gone`, off) |
+| entry cancel | density gone / below 50 % of its peak / −20 % in 10 s (`density_eaten`), an entry against the 1h trend whose approach stalled (`counter_stalled`), price 0.8 % away, or 3 min without a fill |
+| slippage | each stop-out records `slip` (fill beyond the stop price) in the journal; 2 stops slipped > 0.2 % within 24 h → no trades on that symbol for 24 h (in memory: a restart forgets it) |
 
 Why there is no "density gone" exit: the lab's week of paper trading of a similar setup (Engine/Strategy_tester,
 lab/book, 2026-10-24 → 10-31: 2R target, exit as soon as the wall disappears) closed 997 trades at −7.25 USDT,
@@ -65,7 +68,8 @@ never passes silently).
 
 ## Money and safety
 
-- `NOTIONAL` 10 USDT per trade, `LEVERAGE` 2 isolated, `MAX_OPEN` 2 trades at once, one per symbol, 60 s cooldown.
+- `RISK_USD` lost at the stop (default 0.2 % of `NOTIONAL`: 0.30 USDT at 150, about the R of the v0.3.0 stop),
+  `NOTIONAL` 10 USDT per trade at most, `LEVERAGE` 2 isolated, `MAX_OPEN` 2 trades at once, one per symbol, 60 s cooldown.
 - No new entries for the UTC day after `DAY_LOSS` −1 USDT or `MAX_CONSEC_LOSSES` 6 losses in a row;
   `TOTAL_LOSS` −5 USDT halts the strategy for good (`state: error`). Pause / resume from Telegram is persisted.
 - Live: the stop is an exchange-side `STOP_MARKET closePosition` (Algo API) placed the moment the entry fills, plus
@@ -95,6 +99,7 @@ Extra endpoint: `GET /v1/strategies/bounce.density/trades?n=50` — the journal 
 | `WATCH` | `16` | symbols watched at once (2 websockets each) |
 | `NOTIONAL`, `LEVERAGE`, `MAX_OPEN`, `DAY_LOSS`, `TOTAL_LOSS`, `MAX_CONSEC_LOSSES`, `MAX_TRADES_DAY` | 10, 2, 2, 1, 5, 6, 60 | risk |
 | `FEE_REBATE` | `0` | share of the commission the account gets back (`0.4` = 40 %). Journal, reports and loss limits count fees net of it; each trade keeps the amount in `rebate`. The bot does not check that the money arrived |
+| `RISK_USD` | 0.2 % of `NOTIONAL` | USDT a trade loses at its stop (before slippage and fees); the position is risk / stop distance, at most `NOTIONAL` |
 | `NOTIFY_TRADES` | `closes` | `all` / `closes` / `none` |
 | `PARAMS` | — | JSON over `setup.P` and `book.DENS` |
 | `BINANCE_API_KEY` + `BINANCE_API_SECRET` or `BINANCE_PRIVATE_KEY` | — | live only (sealed); Ed25519 PEM, `\n` may be literal |

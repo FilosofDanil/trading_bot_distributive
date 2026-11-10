@@ -7,8 +7,10 @@ TICK = 0.0001
 
 
 def make_book(path: list[tuple[float, float]], dens_price: float, side: str = "bid", now: float = 1000.0,
-              usd: float = 100_000.0, age: float = 100.0, sym: str = "XUSDT", turnover: float = 500_000.0) -> SymbolBook:
-    """`path` = [(seconds before now, mid)], oldest first; the last mid is the current one."""
+              usd: float = 100_000.0, age: float = 100.0, sym: str = "XUSDT", turnover: float = 500_000.0,
+              depth: float = 1000.0) -> SymbolBook:
+    """`path` = [(seconds before now, mid)], oldest first; the last mid is the current one. `depth` = qty every 5
+    ticks up to 1 % beyond the density (what a stop behind it fills against)."""
     b = SymbolBook(sym, TICK)
     for ago, mid in path:
         b.mids.append((now - ago, mid))
@@ -17,7 +19,11 @@ def make_book(path: list[tuple[float, float]], dens_price: float, side: str = "b
     b.bids = {m - 1: 100.0, m - 2: 100.0}
     b.asks = {m + 1: 100.0, m + 2: 100.0}
     k = b.t(dens_price)
-    (b.bids if side == "bid" else b.asks)[k] = usd / dens_price
+    sgn = 1 if side == "bid" else -1
+    behind = b.bids if side == "bid" else b.asks
+    for i in range(5, 101, 5):
+        behind[k - sgn * i] = depth
+    behind[k] = usd / dens_price
     b.densities[(side, k)] = Density(side, k, b.p(k), now - age, usd, usd, now)
     b.turn_q.append((now, turnover))                     # one print = this USDT per minute of turnover
     b.turn_sum = turnover

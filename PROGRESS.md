@@ -144,11 +144,32 @@ win 10.9 %; 604 "density_gone" exits = 0 % win -> the owner's rules drop that ex
 - [x] bounce v0.3.0 in the working tree, not committed: move >= 2.5 % / 30 min, approach >= 0.8 % / 3 min, 100M a day and
       100k a minute floors, 1m bars seeded from klines, parts 1/4 at 25 % / 7/12 at 50 % / 1/6 at 100 % of the move,
       break-even only on tp1, 60 min hold; 50 pytest pass; 5 min paper smoke on the public feed: 16 synced, no errors
-- [ ] Owner: commit and push v0.3.0 (pause in Telegram first, wait 3 min for working entries, resume after the deploy)
-- [ ] after the deploy: log "v0.3.0 started: mode live", `watching 16`, first trades; judge after about 40 trades
+- [x] deploy v0.3.0: e2bada5, deployment 759b9659 SUCCESS 2026-11-04 17:54 UTC, log "v0.3.0 started: mode live, paused,
+      52 trades (-7.0373)", watching 16, no leftovers, no errors; the stop move stays unproven, off with one take
+- [ ] Owner: /resume bounce; then check the first trades; judge after about 40 trades
 - [x] Owner 2026-11-04: the most profitable variant of the replay: density >= 25k, one take at 50 % of the move; parts,
       runner and break-even off by default (PARAMS tp1_frac, run_frac turn them on); 52 pytest pass
 - [x] Owner 2026-11-04: MAX_CONSEC_LOSSES=20 set on Railway without a redeploy (applies with the v0.3.0 deploy)
 - [x] Owner 2026-11-04: 40 % of the commission comes back: FEE_REBATE in the journal, reports and limits (new trades
       only), FEE_REBATE=0.4 set on Railway without a redeploy; replay table recalculated; 53 pytest pass
-- [ ] after the deploy: first closed trade shows fees at 60 %; owner compares with the rebate actually received
+- [x] first v0.3.0 trades 2026-11-05 04:03-05:03 UTC: 6 of 6 stops, -5.31 USDT (4 shorts into a JCT pump, 2 AIN); one take
+      for the whole size and fees at 60 % confirmed (0.126 of 0.210 USDT); a filled take is still unproven
+- [x] Owner 2026-11-06: NOTIONAL=150, DAY_LOSS=4.5; owner redeployed: 2abdfb40 SUCCESS 07:33 UTC, log "v0.3.0 started: mode
+      live, running, 63 trades (-19.2834); 150 USDT/trade", no leftovers, no errors
+- [ ] owner compares the fees with the rebate actually received
+- [ ] Owner to decide: after a stop no new trade on that coin and side for 60 min (replay: profit unchanged, 7 fewer
+      trades, losing streak 7 instead of 8)
+
+## bounce v0.4.0 (2026-11-10, plan docs/bounce_review_2026-11-10.md; owner: pumps stay, the entry must be good)
+- [x] book.py: 1h closes (seeded + tape), ATR(1m), trend EMA20 1h, price 30 min ago, 3 min turnover, density size history
+- [x] setup.py: stop max(stop_buf, 2 x ATR), risk_max 4 % (1.5 % kept 11 of 21 v0.3 trades at -0.56R); counter-trend
+      needs accel >= 1 at placement and until the fill (counter_stalled); tp1 at +1R for 1/2, no BE; skip / cancel
+      when the density lost >= 20 % in 10 s; stop_depth(); new features
+- [x] trader.py: size from RISK_USD (default 0.2 % of NOTIONAL), capped by NOTIONAL; depth check before the entry;
+      BE on tp1 only with be_on_tp1; slip in the journal, 24 h ban after 2 stops slipped > 0.2 % (in memory)
+- [x] feed.py: 1h klines with the 1m seed, ch24 on the book; runner / __main__ lines; VERSION 0.4.0
+- [x] tests for every rule: 64 pytest pass (53 before)
+- [x] README (rules table, variables), review doc
+- [x] paper smoke on the public feed (2 + 5 min: 16 synced, h1 48 each, ATR / trend / ch24 / accel computed, no errors;
+      0 plans in 5 min; JCT ATR 3.8-4.4 %, INIT 2.3-2.8 %: 2 x ATR > risk_max, those stay out while that wild)
+- [ ] Owner: replay / paper before live, commit, push, deploy (not done by Claude)

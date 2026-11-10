@@ -3,7 +3,7 @@ import pytest
 from bounce import book, setup
 from bounce.book import SymbolBook
 from bounce.feed import pick
-from bounce.setup import Manage, Plan, exit_reason, load_params, plan_bounce
+from bounce.setup import Manage, Plan, cancel_reason, exit_reason, load_params, plan_bounce
 from tests.helpers import long_book, make_book, short_book
 
 NOW = 1000.0
@@ -30,7 +30,8 @@ def test_long_entry_in_front_stop_behind_take_at_middle_of_the_move():
     assert f["move_start"] == pytest.approx(1.0400) and f["move"] == pytest.approx(0.0385, abs=1e-4)
     assert f["approach"] == pytest.approx(0.0108, abs=1e-4) and f["move_s"] == pytest.approx(1500)
     assert f["rr"] == pytest.approx((1.0200 - 1.0002) / (1.0002 - 0.9985), abs=0.01)
-    assert p.tp1 == 0.0 and p.tp_run == 0.0          # one take by default
+    assert p.tp1 == pytest.approx(1.0019) and p.tp_run == 0.0      # half at +1R (risk 0.0017), no runner
+    assert f["atr"] is None and f["trend"] is None and f["accel"] is None   # no bars, no hours: rules off
 
 
 def test_short_is_the_mirror():
@@ -39,11 +40,11 @@ def test_short_is_the_mirror():
     assert p.entry == pytest.approx(0.9998)
     assert p.stop == pytest.approx(1.0015)
     assert p.tp == pytest.approx(0.9800)             # middle of the move 0.9600 -> 1.0000
-    assert p.tp1 == 0.0 and p.tp_run == 0.0
+    assert p.tp1 == pytest.approx(0.9981) and p.tp_run == 0.0
 
 
 def test_parts_when_switched_on():
-    setup.P["tp1_frac"], setup.P["run_frac"] = 0.25, 1.0
+    setup.P["tp1_r"], setup.P["tp1_frac"], setup.P["run_frac"] = 0.0, 0.25, 1.0
     p = plan_bounce(long_book(NOW), NOW, set())
     assert p is not None and p.tp == pytest.approx(1.0200)
     assert p.tp1 == pytest.approx(1.0100)            # 25 % of the move
@@ -164,8 +165,136 @@ def test_exits_break_even_then_time():
     assert exit_reason(b, p, 1.0030, m, NOW + 60) == "density_gone"  # no progress yet
 
 
+def bars(b, now, rng, n=14, mid=1.0100):
+    """n complete 1m bars of the range `rng` before the current minute (highs far below the move's 1.04 start)."""
+    cur = int(now // 60)
+    for m in range(cur - n, cur):
+        b.bars.append([m, mid + rng / 2, mid - rng / 2])
+
+
+def hours(b, closes):
+    b.h1.extend([[h, c] for h, c in enumerate(closes)])
+
+
+DOWN = [1.50 - 0.02 * i for i in range(25)]          # 1h closes falling: last < EMA20 -> trend -1
+UP = [1.00 + 0.02 * i for i in range(25)]
+
+
+def test_book_atr_trend_and_price_ago():
+    b = long_book(NOW)
+    assert b.atr(NOW) is None                        # no bars yet
+    bars(b, NOW, 0.004)
+    b.bars.append([int(NOW // 60), 1.2, 0.8])        # the current, unfinished minute does not count
+    assert b.atr(NOW) == pytest.approx(0.004)
+    assert b.trend() is None
+    hours(b, DOWN)
+    assert b.trend() == -1
+    b.h1.clear()
+    hours(b, UP)
+    assert b.trend() == 1
+    assert b.price_ago(NOW, 60) == pytest.approx(1.0070)          # the mid samples
+    assert b.price_ago(NOW, 600) == pytest.approx(1.0400)         # the newest sample at least 600 s old (1500 s)
+    assert b.price_ago(NOW, 1800) is None                         # older than the samples and every bar
+    b.bars.appendleft([int((NOW - 1800) // 60) - 1, 1.06, 1.04])
+    assert b.price_ago(NOW, 1800) == pytest.approx(1.05)          # the middle of the bar of that minute
+
+
+def test_seed_h1_keeps_our_own_hours():
+    b = SymbolBook("XUSDT", 0.0001)
+    b.on_trade({"T": 7_200_500, "p": "1.0100", "q": "1", "m": False})                         # hour 2
+    b.seed_h1([[3_600_000, "1", "1", "1", "1.05"], [7_200_000, "1", "1", "1", "9.99"]])       # hour 2 is ours
+    assert [list(x) for x in b.h1] == [[1, 1.05], [2, pytest.approx(1.01)]]
+
+
+def test_stop_is_two_atr_behind_the_density():
+    b = long_book(NOW)
+    bars(b, NOW, 0.006)                              # ATR 0.6 % > the 0.15 % floor
+    p = plan_bounce(b, NOW, set())
+    assert p is not None and p.stop == pytest.approx(1.0000 - 0.0120)
+    assert p.tp1 == pytest.approx(1.0002 + (1.0002 - 0.9880))       # +1R from the entry
+    assert p.features["atr"] == pytest.approx(0.006 / 1.003, abs=1e-5) and p.features["stop_atr"] == pytest.approx(2.03, abs=0.01)
+    b2 = long_book(NOW)
+    bars(b2, NOW, 0.0004)                            # a quiet coin: 2 x ATR < 0.15 %, the floor stays
+    assert plan_bounce(b2, NOW, set()).stop == pytest.approx(0.9985)
+    big = [(1500, 1.0800), (180, 1.0140), (60, 1.0070), (0, 1.0030)]       # an 8 % move: take 1.0400
+    b3 = make_book(big, 1.0000, "bid", NOW)
+    bars(b3, NOW, 0.010)                             # 2 x ATR = 2 %: wide, but inside risk_max 4 %
+    assert plan_bounce(b3, NOW, set()).stop == pytest.approx(0.9800)
+    b4 = make_book(big, 1.0000, "bid", NOW)
+    bars(b4, NOW, 0.025)                             # 5 %: more than risk_max
+    setup.P["min_rr"] = 0.0
+    assert plan_bounce(b4, NOW, set()) is None
+    setup.P["stop_atr"] = 0.0
+    assert plan_bounce(b4, NOW, set()).stop == pytest.approx(0.9985)
+
+
+def counter_book(now, start_30m):
+    """long_book with a mid sample 31 min ago at `start_30m` (the speed of the 30 min window)."""
+    return make_book([(1860, start_30m), (1500, 1.0400), (180, 1.0140), (60, 1.0070), (0, 1.0030)], 1.0000, "bid",
+                     now)
+
+
+def test_against_the_1h_trend_only_after_a_sharp_approach():
+    # 30 min ago 1.20: the window fell 16 %, the last 3 min 1.08 % -> accel 10 x 1.08 / 16.4 = 0.66 < 1
+    b = counter_book(NOW, 1.20)
+    hours(b, DOWN)                                   # a long into a falling 1h trend: counter
+    assert plan_bounce(b, NOW, set()) is None
+    b.h1.clear()
+    hours(b, UP)                                     # the same entry with the trend: fine
+    p = plan_bounce(b, NOW, set())
+    assert p is not None and p.features["counter"] is False and p.features["accel"] == pytest.approx(0.66, abs=0.01)
+    # 30 min ago 1.05: the window fell 4.5 % -> accel 2.4: a sharp approach, counter allowed
+    b = counter_book(NOW, 1.05)
+    hours(b, DOWN)
+    p = plan_bounce(b, NOW, set())
+    assert p is not None and p.features["counter"] is True and p.features["trend"] == -1
+    assert p.features["accel"] == pytest.approx(2.42, abs=0.01)
+    setup.P["counter_accel"] = 0.0                   # the filter off
+    b = counter_book(NOW, 1.20)
+    hours(b, DOWN)
+    assert plan_bounce(b, NOW, set()) is not None
+
+
+def test_counter_entry_is_cancelled_when_the_approach_stalls():
+    setup.P["cancel_after"] = 600.0
+    b = counter_book(NOW, 1.05)
+    hours(b, DOWN)
+    p = plan_bounce(b, NOW, set())
+    assert p is not None and p.features["counter"]
+    assert cancel_reason(b, p, NOW, NOW) == ""
+    b.mids.append((NOW + 100, 1.0031))
+    b.mids.append((NOW + 300, 1.0030))               # 3 min without progress toward the density
+    assert cancel_reason(b, p, NOW, NOW + 300) == "counter_stalled"
+    p.features["counter"] = False                    # with the trend the stall is no reason
+    assert cancel_reason(b, p, NOW, NOW + 300) == ""
+
+
+def test_a_density_being_eaten_is_not_traded_and_cancels_the_entry():
+    b = long_book(NOW)
+    d = b.densities[("bid", 10000)]
+    p = plan_bounce(b, NOW, set())
+    assert p is not None
+    d.hist.extend([(NOW - 8, 100_000.0), (NOW - 4, 90_000.0)])
+    d.usd = 78_000.0                                 # -22 % in 8 s, still >= 70 % of the peak
+    assert d.drop(NOW, 10) == pytest.approx(0.22)
+    assert plan_bounce(b, NOW, set()) is None
+    assert cancel_reason(b, p, NOW - 1, NOW) == "density_eaten"
+    assert d.drop(NOW + 20, 10) == 0.0               # the drop is older than 10 s
+    setup.P["eat_cancel"] = 0.0
+    assert plan_bounce(b, NOW, set()) is not None
+
+
+def test_stop_depth_counts_the_book_beyond_the_stop():
+    p = plan_bounce(long_book(NOW, depth=10.0), NOW, set())
+    # stop 0.9985, band 0.3 % = 30 ticks: levels every 5 ticks behind the density at 9985 .. 9955 -> 7 x 10
+    assert setup.stop_depth(long_book(NOW, depth=10.0), p) == pytest.approx(70.0)
+    ps = plan_bounce(short_book(NOW, depth=10.0), NOW, set())
+    assert setup.stop_depth(short_book(NOW, depth=10.0), ps) == pytest.approx(70.0)
+
+
 def test_params_override():
-    load_params('{"take_frac": 0.618, "exit_on_gone": true, "usd_min": 80000}')
+    load_params('{"take_frac": 0.618, "exit_on_gone": true, "usd_min": 80000, "be_on_tp1": true, "atr_n": 10}')
+    assert setup.P["be_on_tp1"] is True and setup.P["atr_n"] == 10
     assert setup.P["take_frac"] == 0.618 and setup.P["exit_on_gone"] is True
     assert book.DENS["usd_min"] == 80000.0                          # density keys go to book.DENS
     with pytest.raises(SystemExit):

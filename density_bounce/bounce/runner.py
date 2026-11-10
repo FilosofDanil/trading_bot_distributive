@@ -13,7 +13,7 @@ from . import STRATEGY_ID, STRATEGY_NAME, setup
 from .feed import Feed
 from .sim import SimBroker
 from .state import Store, now_iso, utc_day
-from .trader import RISK, Trader
+from .trader import RISK, Trader, risk_usd
 
 log = logging.getLogger("bounce")
 TICK = 0.5
@@ -174,10 +174,13 @@ class Runner:
             lines.append(f"no new entries: {why}")
         p = setup.P
         lines.append(f"rules: approach >= {p['approach_min']:.2%}/{p['approach_secs']:.0f}s, "
-                     f"move >= {p['move_min']:.2%}/{p['move_secs'] / 60:.0f}min, "
-                     f"stop {p['stop_buf']:.2%} behind, take {p['take_frac']:.0%} of the move, RR >= {p['min_rr']:g}")
-        lines.append(f"risk: {RISK['notional']:g} USDT/trade x{RISK['leverage']}, max {RISK['max_open']} at once, "
-                     f"day stop -{RISK['day_loss']:g}, total stop -{RISK['total_loss']:g} USDT")
+                     f"move >= {p['move_min']:.2%}/{p['move_secs'] / 60:.0f}min, against the 1h trend only with "
+                     f"accel >= {p['counter_accel']:g}, stop max({p['stop_buf']:.2%}, {p['stop_atr']:g} x ATR) behind, "
+                     f"{p['tp1_part']:.0%} at +{p['tp1_r']:g}R, take {p['take_frac']:.0%} of the move, "
+                     f"RR >= {p['min_rr']:g}")
+        lines.append(f"risk: {risk_usd():g} USDT a stop, <= {RISK['notional']:g} USDT/trade x{RISK['leverage']}, "
+                     f"max {RISK['max_open']} at once, day stop -{RISK['day_loss']:g}, "
+                     f"total stop -{RISK['total_loss']:g} USDT")
         for v in self.trader.view():
             lines.append(f"{v['state'].upper()} {v['side']} {v['symbol']} entry {v['entry']:g} stop {v['stop']:g} "
                          f"take {v['tp']:g}" + (f" upnl {v['upnl']:+.4f}" if v["state"] != "entry" else ""))

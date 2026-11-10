@@ -22,7 +22,8 @@ from .state import Store, utc_day
 log = logging.getLogger("bounce")
 
 RISK = {
-    "notional": 10.0,          # USDT per trade
+    "notional": 10.0,          # USDT per trade at most
+    "risk_usd": 0.0,           # USDT lost at the stop; 0 = 0.2 % of the notional (about the R of the v0.3.0 stop)
     "max_open": 2,             # positions + working entries at once
     "day_loss": 1.0,           # no new entries for the UTC day after -1 USDT
     "total_loss": 5.0,         # halt for good after -5 USDT since the record started
@@ -34,7 +35,7 @@ RISK = {
     "fee_rebate": 0.0,         # share of the commission the account gets back (0.4 = 40 %)
 }
 FEE = {"maker": 0.0002, "taker": 0.0005}
-_ENV = {"notional": "NOTIONAL", "max_open": "MAX_OPEN", "day_loss": "DAY_LOSS", "total_loss": "TOTAL_LOSS",
+_ENV = {"notional": "NOTIONAL", "risk_usd": "RISK_USD", "max_open": "MAX_OPEN", "day_loss": "DAY_LOSS", "total_loss": "TOTAL_LOSS",
         "max_consec": "MAX_CONSEC_LOSSES", "max_trades_day": "MAX_TRADES_DAY", "leverage": "LEVERAGE",
         "fee_rebate": "FEE_REBATE"}
 
@@ -45,6 +46,11 @@ def load_risk() -> dict:
         if v:
             RISK[k] = type(RISK[k])(float(v))
     return RISK
+
+
+def risk_usd() -> float:
+    """USDT a trade loses at its stop (before slippage and fees)."""
+    return RISK["risk_usd"] or RISK["notional"] * 0.002
 
 
 @dataclass
@@ -81,6 +87,7 @@ class Trader:
         self.slots: dict[str, Slot] = {}
         self.attempts: dict[tuple, int] = {}         # (sym, dkey) -> attempts
         self.cool: dict[str, float] = {}
+        self.slips: dict[str, list[float]] = {}      # sym -> times of stops that slipped > slip_max
         self.blocked_syms: set[str] = set()          # live: symbols with a position / order the bot did not place
         self.halt = ""                               # set -> no new entries, ever (total loss)
         self.notify_trades = notify_trades           # closes | all | none
@@ -96,10 +103,14 @@ class Trader:
         with self.store.lock:
             self.store.data["stats"][key] = self.store.data["stats"].get(key, 0) + 1
 
-    def size(self, sym: str, price: float) -> float:
+    def size(self, sym: str, price: float, stop: float = 0.0) -> float:
+        """Qty that loses risk_usd() at `stop`, at most NOTIONAL (without a stop: NOTIONAL), on the lot grid."""
         i = self.info[sym]
         step = i["step"]
-        q = round(math.floor(RISK["notional"] / price / step + 1e-9) * step, 10)
+        usd = RISK["notional"]
+        if stop and stop != price:
+            usd = min(usd, risk_usd() / (abs(price - stop) / price))
+        q = round(math.floor(usd / price / step + 1e-9) * step, 10)
         if q < i["min_qty"] or q * price < i["min_notional"]:
             q = round(math.ceil(i["min_notional"] / price / step - 1e-9) * step, 10)
         if q * price > RISK["notional"] * 1.6:
@@ -185,10 +196,18 @@ class Trader:
         if plan is None:
             return
         self._stat("plans")
-        qty = self.size(sym, plan.entry)
+        qty = self.size(sym, plan.entry, plan.stop)
         if qty <= 0:
             self.cool[sym] = now + 600
             return
+        k = setup.P["stop_depth_k"]
+        if k > 0:
+            depth = setup.stop_depth(b, plan)
+            plan.features["depth_x"] = round(depth / qty, 1)
+            if depth < k * qty:                                  # a stop here would slide through an empty book
+                self._stat("thin_stop")
+                self.cool[sym] = now + 30
+                return
         s = Slot(sym, plan, qty, placed_at=now)
         with self.lock:
             self.slots[sym] = s
@@ -227,7 +246,7 @@ class Trader:
             await self._move_stop(s, px, "stop_lock")
             return
         why = setup.exit_reason(b, s.plan, s.entry_px, s.manage, now)
-        if why == "be" or ("tp1" in done and not s.manage.be_done):
+        if why == "be" or ("tp1" in done and setup.P["be_on_tp1"] and not s.manage.be_done):
             s.manage.be_done = True
             await self._move_stop(s, setup.be_price(s.plan, s.entry_px, b.tick_size), "stop_be")
         elif why:
@@ -327,12 +346,16 @@ class Trader:
         rebate = fees * RISK["fee_rebate"]                         # journal and limits count the commission net of it
         fees -= rebate
         pnl += rebate
+        # slippage of a stop-out (> 0 = filled beyond the stop); with a part taken the exit price is an average
+        slip = None
+        if reason in ("stop", "stop_be", "stop_lock") and s.stop and not any(p["done"] for p in s.parts):
+            slip = round(sgn * (s.stop - exit_px) / s.stop, 5)
         tr = {"ts_open": round(s.opened_at, 3), "ts_close": round(now, 3), "sym": sym, "side": s.plan.side,
               "entry": s.entry_px, "exit": exit_px, "qty": s.filled_qty,
               "notional": round(s.entry_px * s.filled_qty, 4), "stop": s.plan.stop, "tp": s.plan.tp,
               "reason": reason, "gross": round(sgn * (exit_px - s.entry_px) * s.filled_qty, 6),
               "fees": round(fees, 6), "rebate": round(rebate, 6), "pnl": round(pnl, 6),
-              "r": round(pnl / r_usd, 3) if r_usd else None,
+              "r": round(pnl / r_usd, 3) if r_usd else None, "slip": slip,
               "hold_s": round(now - s.opened_at, 1), "features": s.plan.features,
               "parts": [{k: p[k] for k in ("name", "px", "qty", "done", "fill_px")} for p in s.parts]}
         self.store.record_trade(tr)
@@ -342,6 +365,15 @@ class Trader:
             self.store.set("consec_block_limit", RISK["max_consec"])
             self.store.set("consec_losses", 0)
         self.cool[sym] = now + RISK["sym_cooldown"]
+        p = setup.P
+        if slip is not None and slip > p["slip_max"]:
+            hits = [t for t in self.slips.get(sym, []) if now - t < p["slip_ban_s"]] + [now]
+            self.slips[sym] = hits
+            if len(hits) >= p["slip_ban_n"]:
+                self.cool[sym] = now + p["slip_ban_s"]
+                self.store.event("warn", f"{sym}: {len(hits)} stops slipped > {p['slip_max']:.1%} within "
+                                         f"{p['slip_ban_s'] / 3600:g} h -> no trades on it for "
+                                         f"{p['slip_ban_s'] / 3600:g} h", True)
         icon = "✅" if pnl > 0 else "❌"
         hit = " ".join(p["name"] for p in s.parts if p["done"])
         self.store.event("info", f"{icon} {s.plan.side} {sym} closed ({reason}) {s.entry_px:g} -> {exit_px:g}: "

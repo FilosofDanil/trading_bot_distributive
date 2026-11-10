@@ -35,9 +35,15 @@ class Density:
     gone_at: float = 0.0
     base_buy: float = 0.0  # cumulative aggressive qty at this price when the density was first seen
     base_sell: float = 0.0
+    hist: deque = field(default_factory=lambda: deque(maxlen=60))         # (ts, usd) of every scan (~0.5 s)
 
     def age(self, now: float) -> float:
         return now - self.first_seen
+
+    def drop(self, now: float, secs: float) -> float:
+        """Share of its size the density lost against its largest size of the last `secs` (0 = none)."""
+        top = max((u for ts, u in self.hist if ts >= now - secs), default=0.0)
+        return 1 - self.usd / top if top > self.usd else 0.0
 
 
 @dataclass
@@ -61,6 +67,8 @@ class SymbolBook:
     trades: deque = field(default_factory=lambda: deque(maxlen=50_000))
     mids: deque = field(default_factory=lambda: deque(maxlen=2_400))      # (ts, mid) every >= 0.25 s
     bars: deque = field(default_factory=lambda: deque(maxlen=240))        # [minute, high, low] of traded prices
+    h1: deque = field(default_factory=lambda: deque(maxlen=48))           # [hour, close] of traded prices
+    ch24: float | None = None                                             # 24h change from the screener's ticker
     densities: dict[tuple[str, int], Density] = field(default_factory=dict)
     last_ts: float = 0.0
     cum_at: dict[int, list] = field(default_factory=dict)                # tick -> [buy qty, sell qty] cumulative
@@ -140,12 +148,23 @@ class SymbolBook:
             bar[1], bar[2] = max(bar[1], px), min(bar[2], px)
         elif not self.bars or m > self.bars[-1][0]:
             self.bars.append([m, px, px])
+        h = int(ts // 3600)
+        if self.h1 and self.h1[-1][0] == h:
+            self.h1[-1][1] = px
+        elif not self.h1 or h > self.h1[-1][0]:
+            self.h1.append([h, px])
 
     def seed_bars(self, klines: list) -> None:
         """Put 1m klines ([open ms, open, high, low, ...]) older than our own tape in front of the bars."""
         first = self.bars[0][0] if self.bars else None
         old = [[int(k[0]) // 60_000, float(k[2]), float(k[3])] for k in klines]
         self.bars.extendleft(reversed([b for b in old if first is None or b[0] < first]))
+
+    def seed_h1(self, klines: list) -> None:
+        """Put 1h klines ([open ms, open, high, low, close, ...]) older than our own tape in front of the hour closes."""
+        first = self.h1[0][0] if self.h1 else None
+        old = [[int(k[0]) // 3_600_000, float(k[4])] for k in klines]
+        self.h1.extendleft(reversed([h for h in old if first is None or h[0] < first]))
 
     def cum(self, tick: int, aggressor: str | None = None) -> float:
         """Cumulative qty traded at `tick` since the stream started (both sides or one aggressor)."""
@@ -181,6 +200,42 @@ class SymbolBook:
                 best = m
                 break
         return best
+
+    def price_ago(self, now: float, seconds: float) -> float | None:
+        """mid_ago, or the middle of the 1m bar of that minute when the mid samples do not reach that far back."""
+        m = self.mid_ago(now, seconds)
+        if m is not None:
+            return m
+        target = int((now - seconds) // 60)
+        for minute, hi, lo in reversed(self.bars):
+            if minute <= target:
+                return (hi + lo) / 2
+        return None
+
+    def atr(self, now: float, n: int = 14) -> float | None:
+        """Mean high - low of the last n complete 1m bars (the bars keep no close, so the range, not the true range)."""
+        cur = int(now // 60)
+        rs = [hi - lo for minute, hi, lo in reversed(self.bars) if minute < cur][:n]
+        return sum(rs) / n if len(rs) == n else None
+
+    def trend(self, n: int = 20) -> int | None:
+        """+1 / -1 when the last price is above / below the EMA(n) of the hour closes, None without n hours."""
+        if len(self.h1) < n:
+            return None
+        closes = [c for _, c in self.h1]
+        e = closes[0]
+        for c in closes[1:]:
+            e += 2 / (n + 1) * (c - e)
+        return (closes[-1] > e) - (closes[-1] < e)
+
+    def turnover(self, now: float, seconds: float) -> float:
+        """USDT traded in the last `seconds` (at most the 15 min the tape queue keeps)."""
+        s = 0.0
+        for ts, usd in reversed(self.turn_q):
+            if ts < now - seconds:
+                break
+            s += usd
+        return s
 
     def qty_at(self, side: str, tick: int) -> float:
         return (self.bids if side == "bid" else self.asks).get(tick, 0.0)
@@ -244,6 +299,7 @@ class SymbolBook:
                 continue
             qty = self.qty_at(d.side, d.tick)
             d.usd = qty * d.price
+            d.hist.append((now, d.usd))
             crossed = (d.side == "bid" and ba is not None and ba <= d.tick) or \
                       (d.side == "ask" and bb is not None and bb >= d.tick)
             if crossed or d.usd < DENS["gone_frac"] * d.peak_usd:

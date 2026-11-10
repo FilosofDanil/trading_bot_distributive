@@ -91,6 +91,9 @@ class Feed:
                 if want != self.watching:
                     log.info("watching %d: %s", len(want), " ".join(want))
                 self.set_symbols(want)
+                chg = {t["symbol"]: round(float(t["priceChangePercent"]) / 100, 4) for t in tick}
+                for s, b in self.trader.books.items():
+                    b.ch24 = chg.get(s)
                 self.screened_at = time.time()
             except Exception as e:
                 log.warning("screener: %r", e)
@@ -111,12 +114,14 @@ class Feed:
         self.watching = sorted(self.tasks)
 
     async def _seed(self, b: SymbolBook) -> None:
-        """The last hour of 1m bars, so a move that began before the symbol was added is measured whole.
-        Without them the bars only fill from the tape: the move looks smaller and the setup just stays out."""
-        try:
-            b.seed_bars(await self.get("/fapi/v1/klines", symbol=b.symbol, interval="1m", limit=60))
-        except Exception as e:
-            log.warning("%s klines: %r", b.symbol, e)
+        """The last hour of 1m bars, so a move that began before the symbol was added is measured whole (and the ATR
+        of the stop is known at once), and 48 hour closes for the 1h trend. Without them both only fill from the
+        tape: the move looks smaller and the setup just stays out, the trend filter stays off for 20 hours."""
+        for interval, limit, seed in (("1m", 60, b.seed_bars), ("1h", 48, b.seed_h1)):
+            try:
+                seed(await self.get("/fapi/v1/klines", symbol=b.symbol, interval=interval, limit=limit))
+            except Exception as e:
+                log.warning("%s klines %s: %r", b.symbol, interval, e)
 
     def _spawn_snapshot(self, b: SymbolBook) -> None:
         if b.symbol not in self.inflight:
