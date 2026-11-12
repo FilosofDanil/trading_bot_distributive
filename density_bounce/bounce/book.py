@@ -11,7 +11,8 @@ from dataclasses import dataclass, field
 
 # density detector parameters (pre-registered, not tuned: the forward test logs every feature to judge them later)
 DENS = {
-    "band": 0.015,        # look for densities within 1.5 % of mid
+    "band": 0.03,         # track densities within 3 % of mid (1.5 % until v0.4.5: a wall met by a fast move was
+                          # first seen seconds before the entry, so its age said nothing about spoofing)
     "base_band": 0.02,    # baseline = median level notional within 2 % of mid on that side
     "ratio": 8.0,         # density >= 8 x the median level
     "usd_min": 25_000.0,  # and >= 25k USDT (50k in v0.2.0: the replay in the README earned less with it)
@@ -204,8 +205,10 @@ class SymbolBook:
     def price_ago(self, now: float, seconds: float) -> float | None:
         """mid_ago, or the middle of the 1m bar of that minute when the mid samples do not reach that far back."""
         m = self.mid_ago(now, seconds)
-        if m is not None:
-            return m
+        return m if m is not None else self.bar_ago(now, seconds)
+
+    def bar_ago(self, now: float, seconds: float) -> float | None:
+        """The middle of the 1m bar of the minute `seconds` ago (None when the bars do not reach that far back)."""
         target = int((now - seconds) // 60)
         for minute, hi, lo in reversed(self.bars):
             if minute <= target:
@@ -218,15 +221,31 @@ class SymbolBook:
         rs = [hi - lo for minute, hi, lo in reversed(self.bars) if minute < cur][:n]
         return sum(rs) / n if len(rs) == n else None
 
-    def trend(self, n: int = 20) -> int | None:
-        """+1 / -1 when the last price is above / below the EMA(n) of the hour closes, None without n hours."""
-        if len(self.h1) < n:
+    def trend(self, n: int = 20, before: float | None = None) -> int | None:
+        """+1 / -1 when the last hour close is above / below the EMA(n) of the hour closes, None without n hours.
+        With `before` only the hours that closed by that time count: the trend BEFORE a move that started then.
+        (Measured at the entry, a bounce off a 2.5 % move is against the trend by construction: 24 of 26 plans.)"""
+        closes = [c for h, c in self.h1 if before is None or (h + 1) * 3600 <= before]
+        if len(closes) < n:
             return None
-        closes = [c for _, c in self.h1]
         e = closes[0]
         for c in closes[1:]:
             e += 2 / (n + 1) * (c - e)
         return (closes[-1] > e) - (closes[-1] < e)
+
+    def flow(self, now: float, seconds: float, aggressor: str) -> float:
+        """USDT traded by one aggressor side ('sell' hits bids, 'buy' lifts asks) in the last `seconds`."""
+        s = 0.0
+        for tr in reversed(self.trades):
+            if tr.ts < now - seconds:
+                break
+            if tr.buyer_maker == (aggressor == "sell"):
+                s += tr.qty * tr.tick
+        return s * self.tick_size
+
+    def flow_rate(self, now: float, aggressor: str, short: float = 60.0, long: float = 180.0) -> float:
+        """USDT a second that side is hitting the book with: the faster of the last minute and the last 3 minutes."""
+        return max(self.flow(now, short, aggressor) / short, self.flow(now, long, aggressor) / long)
 
     def turnover(self, now: float, seconds: float) -> float:
         """USDT traded in the last `seconds` (at most the 15 min the tape queue keeps)."""
@@ -271,13 +290,17 @@ class SymbolBook:
             return
         turn = self.minute_turnover(now)
         mid_t = mid / self.tick_size
+        wide = max(DENS["base_band"], DENS["band"])
         for side, book in (("bid", self.bids), ("ask", self.asks)):
-            lo = mid_t * (1 - DENS["base_band"]) if side == "bid" else mid_t
-            hi = mid_t if side == "bid" else mid_t * (1 + DENS["base_band"])
+            lo = mid_t * (1 - wide) if side == "bid" else mid_t
+            hi = mid_t if side == "bid" else mid_t * (1 + wide)
             lv = [(k, q * k * self.tick_size) for k, q in book.items() if lo <= k <= hi]
-            if len(lv) < 15:
+            base_lo = mid_t * (1 - DENS["base_band"]) if side == "bid" else mid_t
+            base_hi = mid_t if side == "bid" else mid_t * (1 + DENS["base_band"])
+            base_lv = [u for k, u in lv if base_lo <= k <= base_hi]
+            if len(base_lv) < 15:
                 continue
-            base = statistics.median(u for _, u in lv)
+            base = statistics.median(base_lv)
             thr = max(DENS["ratio"] * base, DENS["usd_min"], DENS["minute_k"] * turn)
             band_lo = mid_t * (1 - DENS["band"]) if side == "bid" else mid_t
             band_hi = mid_t if side == "bid" else mid_t * (1 + DENS["band"])
@@ -299,6 +322,7 @@ class SymbolBook:
                 continue
             qty = self.qty_at(d.side, d.tick)
             d.usd = qty * d.price
+            d.peak_usd = max(d.peak_usd, d.usd)                  # also while it is under the detection threshold
             d.hist.append((now, d.usd))
             crossed = (d.side == "bid" and ba is not None and ba <= d.tick) or \
                       (d.side == "ask" and bb is not None and bb >= d.tick)

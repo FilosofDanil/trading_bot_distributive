@@ -8,10 +8,24 @@ from bounce.book import Trade
 from bounce.sim import SimBroker
 from bounce.state import Store, utc_day
 from bounce.trader import RISK, Slot, Trader
-from tests.helpers import long_book
+from tests.helpers import PIN_P, PIN_RISK, long_book
 
 NOW = 1000.0
 INFO = {"XUSDT": {"tick": 0.0001, "step": 1.0, "min_qty": 1.0, "min_notional": 5.0}}
+
+
+@pytest.fixture(autouse=True)
+def fresh_params():
+    """Pinned values (confirm_secs 0 = the old immediate placement; the confirmed entry has its own tests below),
+    restored after every test the way tests/test_setup.py does."""
+    saved, risk = dict(setup.P), dict(RISK)
+    setup.P.update(PIN_P)
+    RISK.update(PIN_RISK)
+    yield
+    setup.P.clear()
+    setup.P.update(saved)
+    RISK.clear()
+    RISK.update(risk)
 
 
 @pytest.fixture

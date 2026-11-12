@@ -31,6 +31,22 @@ A working entry is cancelled when the density goes / shrinks below 50 % / loses 
 1h trend loses its sharp approach (accel < 1 while waiting for the fill), price runs 0.8 % away, or after 3 min.
 Every parameter is in P or book.DENS (both overridable with the PARAMS env var, a JSON object); every plan
 carries its features.
+
+v0.4.5 (the critique of 2026-11-12: 0 full takes in 30 trades of v0.3.0 + v0.4.0):
+- Reality criterion: the density must be worth >= hold_min seconds of the aggressive flow that is hitting it NOW
+  (the faster of the last 1 and 3 min of one-sided tape), so it can hold price for a minute. Until now the size
+  was compared with the average turnover only when the density was first seen, an hour earlier in a calm market
+  (ZEC: a 50k wall against 2.6M a minute). A working entry is cancelled when it falls under hold_cancel seconds.
+- The density is tracked from 3 % away (book.DENS band) and must be min_age 60 s old, so its age is its own.
+- No ATR (no bars yet): no trade. Until now the plan silently fell back to the 0.15 % stop.
+- accel is the speed of the approach against the average speed of the move itself (extreme -> now), without the
+  "99" special case; the 1h trend is the one BEFORE the move began (at the entry every bounce is counter-trend).
+- Market filter: no entry when the other watched coins moved the same way (their median 30 min change >= mkt_max
+  toward the density): in a market-wide dump every wall is hit at once (4 of 9 paper trades were one such dump).
+- Confirmed entry: the order is armed first and placed confirm_secs after price reached the entry level, if the
+  density is still intact (>= 70 % of its peak) and not being eaten.
+- Soft gates (young, weak, counter_slow, market) do not drop the plan silently: `scan` returns it as a shadow plan
+  with `skip` set, and the trader journals what the plain entry would have done (shadow.py).
 """
 from __future__ import annotations
 
@@ -42,7 +58,15 @@ from dataclasses import dataclass, field
 from .book import DENS, Density, SymbolBook
 
 P = {
-    "min_age": 20.0,          # s a density must live before we trust it
+    "min_age": 60.0,          # s a density must live before we trust it (20 until v0.4.5)
+    "shadow_age": 20.0,       # younger than min_age but at least this old: not traded, journaled as a shadow plan
+    "hold_min": 60.0,         # reality criterion: the density is worth >= this many seconds of the aggressive flow
+                              # toward it (the faster of the last 1 and 3 min of one-sided tape); 0 = off
+    "hold_cancel": 30.0,      # a working entry is cancelled when the density is worth < this many seconds (0 = off)
+    "mkt_secs": 1800.0,       # market filter: the median change of the other watched coins over 30 min ...
+    "mkt_max": 0.010,         # ... is >= 1 % toward the density (a market-wide move): no entry (0 = off)
+    "confirm_secs": 15.0,     # place the entry this long after price reached the entry level, if the density
+                              # is still intact (0 = place it at once, as until v0.4.5)
     "intact": 0.7,            # still >= 70 % of its peak size
     "max_touches": 2,         # 0..2 previous approaches
     "place_dist": 0.0035,     # mid within 0.35 % of the density
@@ -111,10 +135,16 @@ class Plan:
     features: dict = field(default_factory=dict)
     tp1: float = 0.0          # first partial take (0 = none)
     tp_run: float = 0.0       # the runner's take (0 = none)
+    skip: str = ""            # soft gates that failed ("young+weak"): a shadow plan, journaled but not traded
+    pid: str = ""             # journal id, set by the trader
 
     @property
     def risk(self) -> float:
         return abs(self.entry - self.stop)
+
+    @property
+    def sgn(self) -> int:
+        return 1 if self.side == "long" else -1
 
 
 def move_start(b: SymbolBook, now: float, secs: float, long: bool) -> tuple[float, float] | None:
@@ -135,18 +165,29 @@ def move_start(b: SymbolBook, now: float, secs: float, long: bool) -> tuple[floa
     return best
 
 
-def accel(b: SymbolBook, now: float, mid: float, sgn: int) -> float | None:
-    """Speed toward the density over the last approach_secs against the average speed over move_secs (None without
-    that history). A window that as a whole did not move toward the density makes a live approach a spike out of
-    nowhere (99, as sharp as it gets) and a stalled one 0."""
-    m_app, p_move = b.mid_ago(now, P["approach_secs"]), b.price_ago(now, P["move_secs"])
-    if m_app is None or p_move is None:
+def accel(b: SymbolBook, now: float, mid: float, sgn: int, start: float, start_ts: float) -> float | None:
+    """Speed toward the density over the last approach_secs against the average speed of the whole move
+    (`start` at `start_ts` -> now): > 1 = the move is accelerating into the density, < 1 = it is slowing down,
+    <= 0 = the approach has stalled or turned. None without the mid history. A move shorter than approach_secs
+    is compared over its own length, so a single straight drop is 1.
+    (Until v0.4.5 the base was the net change over 30 min: with approach_min 0.8 % in 3 min the value could be
+    < 1 only after a 30 min move of > 8 %, so the filter never fired, and a round trip scored a made-up 99.)"""
+    dur = max(now - start_ts, 30.0)
+    w = min(P["approach_secs"], dur)
+    m_app = b.mid_ago(now, w)
+    if m_app is None or start <= 0:
         return None
-    app = (m_app - mid) / m_app * sgn
-    v = (p_move - mid) / p_move * sgn
-    if v <= 0:
-        return 99.0 if app > 0 else 0.0
-    return app / P["approach_secs"] / (v / P["move_secs"])
+    tot = (start - mid) / start * sgn
+    if tot <= 0:
+        return None
+    return (m_app - mid) / m_app * sgn / w / (tot / dur)
+
+
+def hold_secs(b: SymbolBook, d: Density, now: float) -> tuple[float | None, float]:
+    """(seconds the density can absorb the aggressive flow that is hitting its side now, that flow in USDT / s).
+    None without tape."""
+    rate = b.flow_rate(now, "sell" if d.side == "bid" else "buy", P["impulse_secs"], P["approach_secs"])
+    return (d.usd / rate if rate > 0 else None), rate
 
 
 def _features(b: SymbolBook, d: Density, now: float, mid: float, spread: float) -> dict:
@@ -156,22 +197,32 @@ def _features(b: SymbolBook, d: Density, now: float, mid: float, spread: float) 
             "minute_usd": round(turn), "dens_vs_minute": round(d.peak_usd / turn, 2) if turn else None}
 
 
-def plan_bounce(b: SymbolBook, now: float, skip: set) -> Plan | None:
-    """The best (nearest) bounce entry on this book right now, or None."""
+def plan_bounce(b: SymbolBook, now: float, skip: set, mkt: float | None = None) -> Plan | None:
+    """The best (nearest) bounce entry on this book right now that passes every gate, or None."""
+    return scan(b, now, skip, mkt)[0]
+
+
+def scan(b: SymbolBook, now: float, skip: set, mkt: float | None = None) -> tuple[Plan | None, Plan | None]:
+    """(the nearest entry that passes every gate, the nearest one that fails only soft gates: a shadow plan with
+    `skip` = "young" / "weak" / "counter_slow" / "market", joined by "+"). `mkt` = the median change of the other
+    watched coins over mkt_secs (None = unknown: no market filter)."""
     mid, bb, ba = b.mid(), b.best_bid(), b.best_ask()
     if mid is None or bb is None or ba is None:
-        return None
+        return None, None
     spread = (ba - bb) * b.tick_size / mid
     if b.tick_size / mid > P["tick_max"] or spread > P["spread_max"] or b.minute_turnover(now) < P["minute_min"]:
-        return None
+        return None, None
     m_ago = b.mid_ago(now, P["impulse_secs"])
     if m_ago is None:
-        return None
+        return None, None
     atr = b.atr(now, P["atr_n"]) if P["stop_atr"] > 0 else None
-    trend = b.trend(P["trend_ema"])
-    best = None
+    if P["stop_atr"] > 0 and not atr:
+        return None, None                                      # no bars yet: the stop would be the bare stop_buf
+    best: dict[bool, tuple[float, Plan]] = {}
     for d in b.alive():
-        if (d.side, d.tick) in skip or d.age(now) < P["min_age"] or d.touches > P["max_touches"]:
+        if (d.side, d.tick) in skip or d.touches > P["max_touches"]:
+            continue
+        if d.age(now) < min(P["min_age"], P["shadow_age"]):
             continue
         if d.usd < P["intact"] * d.peak_usd:
             continue
@@ -199,10 +250,20 @@ def plan_bounce(b: SymbolBook, now: float, skip: set) -> Plan | None:
         move = (start - d.price) / start * sgn
         if move < P["move_min"]:
             continue
-        acc = accel(b, now, mid, sgn)
+        acc = accel(b, now, mid, sgn, start, start_ts)
+        trend = b.trend(P["trend_ema"], before=start_ts)       # the 1h trend before this move began
         counter = trend == -sgn
+        hold, rate = hold_secs(b, d, now)
+        mkt_to = None if mkt is None else -mkt * sgn           # the market's move toward the density
+        why = []                                               # soft gates: journaled as a shadow plan
+        if d.age(now) < P["min_age"]:
+            why.append("young")
+        if P["hold_min"] > 0 and hold is not None and hold < P["hold_min"]:
+            why.append("weak")                                 # not worth a minute of the flow that is hitting it
         if counter and P["counter_accel"] > 0 and acc is not None and acc < P["counter_accel"]:
-            continue                                           # against the 1h trend, creeping in: no reversal sign
+            why.append("counter_slow")                         # against the trend, slowing down: no reversal sign
+        if P["mkt_max"] > 0 and mkt_to is not None and mkt_to >= P["mkt_max"]:
+            why.append("market")                               # every coin is moving this way: walls do not hold
         front = max(1, math.ceil(P["front"] * d.price / b.tick_size))
         buf = max(2, math.ceil(P["stop_buf"] * d.price / b.tick_size))
         if atr:
@@ -218,15 +279,18 @@ def plan_bounce(b: SymbolBook, now: float, skip: set) -> Plan | None:
         reward = (tp - entry) * sgn / entry
         if not (P["risk_min"] <= risk <= P["risk_max"]) or reward <= 0 or reward < P["min_rr"] * risk:
             continue
-        if best is None or dist < best[0]:
+        ok = not why
+        if ok not in best or dist < best[ok][0]:
             turn = b.minute_turnover(now)
             f = _features(b, d, now, mid, spread) | {
                 "moved60": round(moved, 5), "approach": round(approach, 5), "move": round(move, 5),
-                "move_start": start, "move_s": round(now - start_ts, 1), "risk": round(risk, 5),
-                "reward": round(reward, 5), "rr": round(reward / risk, 2),
+                "move_start": start, "move_ts": round(start_ts, 1), "move_s": round(now - start_ts, 1),
+                "risk": round(risk, 5), "reward": round(reward, 5), "rr": round(reward / risk, 2),
                 "atr": round(atr / mid, 5) if atr else None,
                 "stop_atr": round(abs(entry - stop) / atr, 2) if atr else None,
                 "trend": trend, "counter": counter, "accel": round(acc, 2) if acc is not None else None,
+                "hold_s": round(hold, 1) if hold is not None else None, "flow_s": round(rate),
+                "mkt": round(mkt, 5) if mkt is not None else None,
                 "vol_ratio": round(b.turnover(now, 180) / 3 / turn, 2) if turn else None,
                 "ch24": b.ch24, "drop10": round(d.drop(now, P["eat_secs"]), 3)}
             # partial takes, rounded toward the entry (a take that is touched but not traded through stays unfilled)
@@ -239,12 +303,17 @@ def plan_bounce(b: SymbolBook, now: float, skip: set) -> Plan | None:
             run_raw = d.price + sgn * P["run_frac"] * abs(start - d.price)
             run_t = math.floor(run_raw / b.tick_size + 1e-9) if long else math.ceil(run_raw / b.tick_size - 1e-9)
             tp_run = b.p(run_t) if (run_t - tp_t) * sgn > 0 else 0.0
-            best = (dist, Plan("long" if long else "short", entry, stop, tp, (d.side, d.tick), f, tp1, tp_run))
-    return best[1] if best else None
+            best[ok] = (dist, Plan("long" if long else "short", entry, stop, tp, (d.side, d.tick), f, tp1, tp_run,
+                                   "+".join(why)))
+    return (best[True][1] if True in best else None), (best[False][1] if False in best else None)
+
+
+WALL_FAILED = ("density_gone", "density_shrank", "density_eaten", "density_weak", "unconfirmed")
 
 
 def cancel_reason(b: SymbolBook, plan: Plan, placed_at: float, now: float) -> str:
-    """Why a working entry should be cancelled ('' = keep it)."""
+    """Why an armed or working entry should be cancelled ('' = keep it). The WALL_FAILED reasons say the density
+    itself let us down: the trader does not try that density again for a while."""
     d = b.densities.get(plan.dkey)
     mid = b.mid()
     if d is None or d.gone:
@@ -253,9 +322,13 @@ def cancel_reason(b: SymbolBook, plan: Plan, placed_at: float, now: float) -> st
         return "density_shrank"
     if P["eat_cancel"] > 0 and d.drop(now, P["eat_secs"]) >= P["eat_cancel"]:
         return "density_eaten"
-    if plan.features.get("counter") and P["counter_accel"] > 0 and mid:
+    if P["hold_cancel"] > 0:
+        hold, _ = hold_secs(b, d, now)
+        if hold is not None and hold < P["hold_cancel"]:
+            return "density_weak"                              # the flow has grown: the wall is seconds of it now
+    if plan.features.get("counter") and P["counter_accel"] > 0 and mid and plan.features.get("move_ts"):
         # against the 1h trend the entry needs the approach to stay sharp until the fill: the owner's "it crept in"
-        a = accel(b, now, mid, 1 if plan.side == "long" else -1)
+        a = accel(b, now, mid, plan.sgn, plan.features["move_start"], plan.features["move_ts"])
         if a is not None and a < P["counter_accel"]:
             return "counter_stalled"
     if mid and abs(mid - d.price) / mid > P["cancel_dist"]:
@@ -263,6 +336,32 @@ def cancel_reason(b: SymbolBook, plan: Plan, placed_at: float, now: float) -> st
     if now - placed_at > P["cancel_after"]:
         return "entry_timeout"
     return ""
+
+
+def touched(b: SymbolBook, plan: Plan) -> bool:
+    """Price has reached the entry level: no bid is left above it (long) / no ask below it (short), so an order
+    resting there would be first in line."""
+    e_t = b.t(plan.entry)
+    bb, ba = b.best_bid(), b.best_ask()
+    if bb is None or ba is None:
+        return False
+    return bb <= e_t if plan.side == "long" else ba >= e_t
+
+
+def confirm(b: SymbolBook, plan: Plan) -> tuple[str, int | None]:
+    """After confirm_secs at the entry level: ('', tick to place the post-only entry at) when the density held,
+    ('unconfirmed', None) when it did not (under intact of its peak or price is through it), ('', None) = wait
+    (no room between the density and the opposite quote yet)."""
+    d = b.densities.get(plan.dkey)
+    bb, ba = b.best_bid(), b.best_ask()
+    if d is None or d.gone or bb is None or ba is None or d.usd < P["intact"] * d.peak_usd:
+        return "unconfirmed", None
+    e_t, long = b.t(plan.entry), plan.side == "long"
+    if long:
+        t = min(e_t, ba - 1)                                   # post-only: below the best ask
+        return ("", t) if t > d.tick else ("", None)
+    t = max(e_t, bb + 1)
+    return ("", t) if t < d.tick else ("", None)
 
 
 def stop_depth(b: SymbolBook, plan: Plan) -> float:

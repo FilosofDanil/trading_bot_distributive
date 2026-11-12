@@ -5,16 +5,29 @@ from bounce.book import Density, SymbolBook
 
 TICK = 0.0001
 
+# The tuned values the tests depend on, pinned explicitly (the defaults of counter_accel / mkt_max may change after a
+# study; no test may rely on them). Fixtures apply this on top of setup.P; tests that exercise one value set it again.
+PIN_P = {"min_age": 60.0, "shadow_age": 20.0, "hold_min": 60.0, "hold_cancel": 30.0, "mkt_max": 0.01,
+         "mkt_secs": 1800.0, "counter_accel": 1.0, "confirm_secs": 0.0, "intact": 0.7, "stop_atr": 2.0,
+         "atr_n": 14, "trend_ema": 20, "cancel_after": 180.0}
+PIN_RISK = {"day_loss_r": 6.0, "guard_n": 30, "guard_r": -0.3, "wall_cool": 1800.0, "sym_cooldown": 60.0}
+
 
 def make_book(path: list[tuple[float, float]], dens_price: float, side: str = "bid", now: float = 1000.0,
               usd: float = 100_000.0, age: float = 100.0, sym: str = "XUSDT", turnover: float = 500_000.0,
-              depth: float = 1000.0) -> SymbolBook:
+              depth: float = 1000.0, bars: bool = True, atr: float = 0.0002, n_bars: int = 16) -> SymbolBook:
     """`path` = [(seconds before now, mid)], oldest first; the last mid is the current one. `depth` = qty every 5
-    ticks up to 1 % beyond the density (what a stop behind it fills against)."""
+    ticks up to 1 % beyond the density (what a stop behind it fills against). `bars` seeds `n_bars` complete 1m bars
+    of range `atr` centred on the last mid (so the ATR exists, 2 x ATR stays below the 0.15 % stop floor for the
+    default range, and they never become the extreme of the move); bars=False leaves the book without bars."""
     b = SymbolBook(sym, TICK)
     for ago, mid in path:
         b.mids.append((now - ago, mid))
     mid = path[-1][1]
+    if bars:
+        cur = int(now // 60)
+        for m in range(cur - n_bars, cur):
+            b.bars.append([m, mid + atr / 2, mid - atr / 2])
     m = b.t(mid)
     b.bids = {m - 1: 100.0, m - 2: 100.0}
     b.asks = {m + 1: 100.0, m + 2: 100.0}

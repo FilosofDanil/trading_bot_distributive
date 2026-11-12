@@ -15,8 +15,9 @@ import threading
 import time
 from dataclasses import dataclass, field
 
-from . import setup
+from . import VERSION, setup
 from .book import SymbolBook
+from .shadow import Shadow
 from .state import Store, utc_day
 
 log = logging.getLogger("bounce")
@@ -26,18 +27,24 @@ RISK = {
     "risk_usd": 0.0,           # USDT lost at the stop; 0 = 0.2 % of the notional (about the R of the v0.3.0 stop)
     "max_open": 2,             # positions + working entries at once
     "day_loss": 1.0,           # no new entries for the UTC day after -1 USDT
+    "day_loss_r": 6.0,         # ... or after -6 R (the USDT limits were 15 stops a day: they never bound); 0 = off
     "total_loss": 5.0,         # halt for good after -5 USDT since the record started
     "max_consec": 6,           # 6 losses in a row -> no new entries until the next UTC day
     "max_trades_day": 60,
-    "sym_cooldown": 60.0,      # s after a closed trade before the same symbol trades again
+    "sym_cooldown": 60.0,      # s after a closed trade or a cancelled entry before the same symbol trades again
+    "wall_cool": 1800.0,       # s without entries at a density whose entry was cancelled because the density failed
     "attempts_per_density": 2,
     "leverage": 2,
     "fee_rebate": 0.0,         # share of the commission the account gets back (0.4 = 40 %)
+    "guard_n": 30,             # live only: after this many trades of the running version ...
+    "guard_r": -0.3,           # ... a mean R below this halts the strategy (the review's rule; guard_n 0 = off)
 }
 FEE = {"maker": 0.0002, "taker": 0.0005}
 _ENV = {"notional": "NOTIONAL", "risk_usd": "RISK_USD", "max_open": "MAX_OPEN", "day_loss": "DAY_LOSS", "total_loss": "TOTAL_LOSS",
         "max_consec": "MAX_CONSEC_LOSSES", "max_trades_day": "MAX_TRADES_DAY", "leverage": "LEVERAGE",
-        "fee_rebate": "FEE_REBATE"}
+        "fee_rebate": "FEE_REBATE", "day_loss_r": "DAY_LOSS_R", "guard_n": "GUARD_N", "guard_r": "GUARD_R"}
+SHADOW_EVERY = 600.0           # s between two shadow plans of one density skipped by the same gates
+SHADOW_MAX = 60                # shadow plans followed at once
 
 
 def load_risk() -> dict:
@@ -58,7 +65,7 @@ class Slot:
     sym: str
     plan: setup.Plan
     qty: float
-    state: str = "entry"           # entry | open | closing
+    state: str = "entry"           # arm (waiting for the confirmation, no order yet) | entry | open | closing
     placed_at: float = 0.0
     filled_qty: float = 0.0
     entry_px: float = 0.0
@@ -86,6 +93,12 @@ class Trader:
         self.books: dict[str, SymbolBook] = {}
         self.slots: dict[str, Slot] = {}
         self.attempts: dict[tuple, int] = {}         # (sym, dkey) -> attempts
+        self.failed: dict[tuple, float] = {}         # (sym, dkey) -> no entries at that density until this time
+        self.shadows: dict[str, Shadow] = {}         # pid -> the plain entry of that plan, followed on the tape
+        self.shadow_seen: dict[tuple, float] = {}    # (sym, dkey, skip) -> time of its last shadow plan
+        self.live = False                            # set by the runner: the guard on the mean R is for live money
+        self._guard: str | None = None               # cached verdict of the guard (None = recompute)
+        self._mkt: tuple[float, dict[str, float]] = (0.0, {})
         self.cool: dict[str, float] = {}
         self.slips: dict[str, list[float]] = {}      # sym -> times of stops that slipped > slip_max
         self.blocked_syms: set[str] = set()          # live: symbols with a position / order the bot did not place
@@ -148,6 +161,16 @@ class Trader:
         today = d["days"].get(day, {})
         if today.get("pnl", 0.0) <= -RISK["day_loss"]:
             return f"day loss {today['pnl']:.2f} <= -{RISK['day_loss']:g} USDT"
+        if RISK["day_loss_r"] > 0 and today.get("r", 0.0) <= -RISK["day_loss_r"]:
+            return f"day loss {today['r']:.2f}R <= -{RISK['day_loss_r']:g}R"
+        if self.live and RISK["guard_n"] > 0:
+            if self._guard is None:
+                rs = [t["r"] for t in d["trades"] if t.get("ver") == VERSION and t.get("r") is not None]
+                mean = sum(rs) / len(rs) if rs else 0.0
+                self._guard = (f"mean {mean:+.2f}R over {len(rs)} trades of v{VERSION} < {RISK['guard_r']:g}R: "
+                               f"halted, back to paper") if len(rs) >= RISK["guard_n"] and mean < RISK["guard_r"] else ""
+            if self._guard:
+                return self._guard
         limit = d.get("consec_block_limit", 0)       # raising MAX_CONSEC_LOSSES lifts a block set under a lower limit
         if d.get("consec_block_day") == day and limit >= RISK["max_consec"]:
             return f"{limit} losses in a row today"
@@ -160,7 +183,9 @@ class Trader:
         for sym, b in list(self.books.items()):
             s = self.slots.get(sym)
             if not b.synced or now - b.last_ts > 5:              # blind book: no new decisions
-                if s and s.state == "entry" and not s.cancel_sent:
+                if s and s.state == "arm":
+                    self._entry_over(s, "stale_book", now)
+                elif s and s.state == "entry" and not s.cancel_sent:
                     s.cancel_sent = True
                     s.extra["cancel_reason"] = "stale_book"
                     await self.broker.cancel_entry(s)
@@ -169,6 +194,8 @@ class Trader:
             try:
                 if s is None:
                     await self._seek(sym, b, now)
+                elif s.state == "arm":
+                    await self._watch_arm(s, b, now)
                 elif s.state == "entry":
                     await self._watch_entry(s, b, now)
                 elif s.state == "open":
@@ -176,7 +203,63 @@ class Trader:
             except Exception as e:                               # never let one symbol kill the loop
                 log.exception("tick %s: %s", sym, e)
                 self.store.event("error", f"{sym}: tick: {type(e).__name__}: {e}")
+        self._step_shadows(now)
 
+    # ------------------------------------------------------------------ market, shadow plans
+    def keep(self) -> set[str]:
+        """Symbols the feed must keep watching: the bot's trades and the shadow plans still being followed."""
+        return set(self.slots) | {sh.sym for sh in self.shadows.values()}
+
+    def market(self, sym: str, now: float) -> float | None:
+        """Median change of the other watched coins over mkt_secs (None with fewer than 5 of them): < 0 = the
+        market is falling. Refreshed every 10 s."""
+        if now - self._mkt[0] > 10:
+            ch = {}
+            for s, b in self.books.items():
+                mid, old = b.mid(), b.bar_ago(now, setup.P["mkt_secs"])
+                if b.synced and mid and old:
+                    ch[s] = mid / old - 1
+            self._mkt = (now, ch)
+        rs = sorted(r for s, r in self._mkt[1].items() if s != sym)
+        if len(rs) < 5:
+            return None
+        m = len(rs) // 2
+        return rs[m] if len(rs) % 2 else (rs[m - 1] + rs[m]) / 2
+
+    def _shadow(self, sym: str, plan: setup.Plan, now: float, act: str, final: bool) -> None:
+        """Start following the plain entry of this plan. Skipped plans: one per density and gate set in 10 min."""
+        if final:
+            key = (sym, plan.dkey, plan.skip)
+            if now - self.shadow_seen.get(key, 0) < SHADOW_EVERY or len(self.shadows) >= SHADOW_MAX:
+                return
+            self.shadow_seen[key] = now
+        plan.pid = f"{sym}-{int(now * 1000)}"
+        self.shadows[plan.pid] = Shadow(sym, plan, now, act, final)
+
+    def _act(self, pid: str, act: str) -> None:
+        """What the bot finally did with a plan it traded (cancel:<why> or filled)."""
+        sh = self.shadows.get(pid)
+        if sh is not None:
+            sh.act, sh.final = act, True
+
+    def _step_shadows(self, now: float) -> None:
+        for pid, sh in list(self.shadows.items()):
+            b = self.books.get(sh.sym)
+            try:
+                if b is None:
+                    sh.lost()
+                elif b.synced:
+                    sh.step(b, now, FEE)
+                elif now - sh.last_ts > 300:
+                    sh.lost()
+                if sh.state == "done" and (sh.final or now - sh.t0 > 2 * setup.P["max_hold"]):
+                    del self.shadows[pid]
+                    self.store.plan(sh.record(VERSION))
+            except Exception as e:
+                log.exception("shadow %s: %s", pid, e)
+                self.shadows.pop(pid, None)
+
+    # ------------------------------------------------------------------ entries
     async def _seek(self, sym: str, b: SymbolBook, now: float) -> None:
         if self.halt or self.paused() or sym in self.blocked_syms or now < self.cool.get(sym, 0):
             return
@@ -192,7 +275,10 @@ class Trader:
                 self.halt = why
             return
         skip = {k[1] for k, n in self.attempts.items() if k[0] == sym and n >= RISK["attempts_per_density"]}
-        plan = setup.plan_bounce(b, now, skip)
+        skip |= {k[1] for k, until in self.failed.items() if k[0] == sym and until > now}
+        plan, ghost = setup.scan(b, now, skip, self.market(sym, now))
+        if ghost is not None:                                    # stopped by a soft gate: journal what it would do
+            self._shadow(sym, ghost, now, f"skip:{ghost.skip}", True)
         if plan is None:
             return
         self._stat("plans")
@@ -206,23 +292,71 @@ class Trader:
             plan.features["depth_x"] = round(depth / qty, 1)
             if depth < k * qty:                                  # a stop here would slide through an empty book
                 self._stat("thin_stop")
+                plan.skip = "thin_stop"
+                self._shadow(sym, plan, now, "skip:thin_stop", True)
                 self.cool[sym] = now + 30
                 return
         s = Slot(sym, plan, qty, placed_at=now)
+        if setup.P["confirm_secs"] > 0:
+            s.state = "arm"                                      # no order yet: wait for the density to be tested
         with self.lock:
             self.slots[sym] = s
         self.attempts[(sym, plan.dkey)] = self.attempts.get((sym, plan.dkey), 0) + 1
+        self._shadow(sym, plan, now, "open", False)
         log.info("PLAN %s %s entry %g stop %g tp %g qty %g %s", sym, plan.side, plan.entry, plan.stop, plan.tp,
                  qty, plan.features)
+        if s.state == "arm":
+            self._stat("armed")
+        else:
+            await self._place(s, now)
+
+    async def _place(self, s: Slot, now: float) -> None:
         try:
             await self.broker.place_entry(s)
             self._stat("placed")
         except Exception as e:
             self._stat("rejected")
-            log.info("%s entry rejected: %s", sym, e)
-            with self.lock:
-                self.slots.pop(sym, None)
-            self.cool[sym] = now + 30
+            log.info("%s entry rejected: %s", s.sym, e)
+            self._entry_over(s, "rejected", now)
+
+    def _entry_over(self, s: Slot, why: str, now: float) -> None:
+        """An armed or working entry ended without a fill: free the slot, journal the reason, set the cooldowns."""
+        with self.lock:
+            self.slots.pop(s.sym, None)
+        self._stat("cancelled")
+        self._stat(f"cancel_{why}")
+        self._act(s.plan.pid, f"cancel:{why}")
+        log.info("CANCEL %s %s entry %g: %s", s.sym, s.plan.side, s.plan.entry, why)
+        if why in setup.WALL_FAILED:                             # the density let us down: not that one again
+            self.failed[(s.sym, s.plan.dkey)] = now + RISK["wall_cool"]
+            self.cool[s.sym] = now + 5
+        else:
+            self.cool[s.sym] = now + (30 if why == "rejected" else RISK["sym_cooldown"])
+
+    async def _watch_arm(self, s: Slot, b: SymbolBook, now: float) -> None:
+        """The confirmed entry: wait until price reaches the entry level, then confirm_secs more; place the order
+        only if the density is still intact."""
+        why = "halt" if self.halt else "paused" if self.paused() else \
+            setup.cancel_reason(b, s.plan, s.placed_at, now)
+        if why:
+            return self._entry_over(s, why, now)
+        t0 = s.extra.get("touch_at")
+        if t0 is None:
+            if setup.touched(b, s.plan):
+                s.extra["touch_at"] = now
+            return
+        if now - t0 < setup.P["confirm_secs"]:
+            return
+        why, tick = setup.confirm(b, s.plan)
+        if why:
+            return self._entry_over(s, why, now)
+        if tick is None:
+            return                                               # no room for a post-only order yet
+        s.extra["armed_s"] = round(now - s.placed_at, 1)
+        s.plan.features["armed_s"] = s.extra["armed_s"]
+        s.plan.entry = b.p(tick)
+        s.state, s.placed_at = "entry", now
+        await self._place(s, now)
 
     async def _watch_entry(self, s: Slot, b: SymbolBook, now: float) -> None:
         if s.cancel_sent:
@@ -296,7 +430,9 @@ class Trader:
         n = 0
         for s in list(self.slots.values()):
             n += 1
-            if s.state == "entry" and not s.cancel_sent:
+            if s.state == "arm":
+                self._entry_over(s, "flatten", time.time())
+            elif s.state == "entry" and not s.cancel_sent:
                 s.cancel_sent = True
                 s.extra["cancel_reason"] = "flatten"
                 await self.broker.cancel_entry(s)
@@ -310,11 +446,9 @@ class Trader:
         if s is None or s.state != "entry":
             return
         if filled <= 0:
-            self._stat("cancelled")
-            with self.lock:
-                self.slots.pop(sym, None)
-            self.cool[sym] = time.time() + 5
+            self._entry_over(s, s.extra.get("cancel_reason") or "expired", time.time())
             return
+        self._act(s.plan.pid, "filled")
         s.filled_qty, s.entry_px, s.entry_fee = filled, avg_px, fee
         s.state, s.opened_at, s.stop = "open", time.time(), s.plan.stop
         s.manage = setup.Manage(opened_at=s.opened_at)
@@ -350,7 +484,9 @@ class Trader:
         slip = None
         if reason in ("stop", "stop_be", "stop_lock") and s.stop and not any(p["done"] for p in s.parts):
             slip = round(sgn * (s.stop - exit_px) / s.stop, 5)
-        tr = {"ts_open": round(s.opened_at, 3), "ts_close": round(now, 3), "sym": sym, "side": s.plan.side,
+        self._guard = None
+        tr = {"ver": VERSION, "pid": s.plan.pid,
+              "ts_open": round(s.opened_at, 3), "ts_close": round(now, 3), "sym": sym, "side": s.plan.side,
               "entry": s.entry_px, "exit": exit_px, "qty": s.filled_qty,
               "notional": round(s.entry_px * s.filled_qty, 4), "stop": s.plan.stop, "tp": s.plan.tp,
               "reason": reason, "gross": round(sgn * (exit_px - s.entry_px) * s.filled_qty, 6),
@@ -391,7 +527,8 @@ class Trader:
             b = self.books.get(s.sym)
             mid = (b.mid() if b else None) or (marks or {}).get(s.sym)
             sgn = 1 if s.plan.side == "long" else -1
-            upnl = sgn * (mid - s.entry_px) * s.filled_qty - s.entry_fee if (mid and s.state != "entry") else 0.0
+            upnl = sgn * (mid - s.entry_px) * s.filled_qty - s.entry_fee \
+                if (mid and s.state not in ("arm", "entry")) else 0.0
             out.append({"symbol": s.sym, "side": s.plan.side, "state": s.state, "entry": s.entry_px or s.plan.entry,
                         "stop": s.stop or s.plan.stop, "tp": s.plan.tp, "qty": s.filled_qty or s.qty,
                         "n": round((s.entry_px or s.plan.entry) * (s.filled_qty or s.qty), 2), "mark": mid,

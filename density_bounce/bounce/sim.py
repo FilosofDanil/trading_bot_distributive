@@ -6,10 +6,12 @@ Fill model (conservative for a small order):
 - stop (last price): triggered by the first trade at/through it, filled at that trade price - 0.02 % slippage;
 - reduce-only take limits (one per part): the same queue rule as the entry, each with its own queue;
 - market close: best opposite price - 0.01 %.
-Fees: maker 0.02 %, taker 0.05 %. Latency is not modelled, so paper results are an upper bound.
+Fees: maker 0.02 %, taker 0.05 %. Latency: SIM_LAG (0.3 s) on placing and cancelling an entry (v0.4.5); the stop
+and the takes have none, so paper results are still an upper bound.
 """
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 from .book import SymbolBook, Trade
@@ -17,9 +19,13 @@ from .trader import FEE, Slot, stop_reason
 
 
 class SimBroker:
-    def __init__(self):
+    def __init__(self, lag: float = 0.0):
+        """`lag` (s) is the round trip to the exchange: a new entry starts to count the tape that late, and a
+        cancel takes effect that late, so the order can still fill meanwhile, as a live cancel can. Without it
+        the paper record credits every "density is being eaten" cancel with a perfect escape."""
         self.trader: Any = None                 # set by Trader()
         self.o: dict[str, dict] = {}            # sym -> working order state
+        self.lag = lag
 
     def _book(self, sym: str) -> SymbolBook:
         return self.trader.books[sym]
@@ -31,13 +37,20 @@ class SimBroker:
         bb, ba = b.best_bid(), b.best_ask()
         if bb is None or ba is None or (long and e >= ba) or (not long and e <= bb):
             raise RuntimeError("post-only would cross")
-        self.o[s.sym] = {"kind": "entry", "tick": e, "queue": b.qty_at("bid" if long else "ask", e), "traded": 0.0}
+        self.o[s.sym] = {"kind": "entry", "tick": e, "queue": b.qty_at("bid" if long else "ask", e), "traded": 0.0,
+                         "live_at": b.last_ts + self.lag}
 
-    async def cancel_entry(self, s: Slot) -> None:
+    def _cancel_done(self, s: Slot) -> None:
         o = self.o.get(s.sym)
         if o and o["kind"] == "entry":
             del self.o[s.sym]
-        self.trader.on_entry_result(s.sym, 0, 0, 0)
+        self.trader.on_entry_result(s.sym, 0, 0, 0)          # ignored when the entry filled meanwhile
+
+    async def cancel_entry(self, s: Slot) -> None:
+        if self.lag > 0:
+            asyncio.get_running_loop().call_later(self.lag, self._cancel_done, s)
+        else:
+            self._cancel_done(s)
 
     async def protect(self, s: Slot) -> None:
         b = self._book(s.sym)
@@ -89,6 +102,8 @@ class SimBroker:
         long = s.plan.side == "long"
         b = self._book(sym)
         if o["kind"] == "entry" and s.state == "entry":
+            if tr.ts < o["live_at"]:                          # the order has not reached the exchange yet
+                return
             e = o["tick"]
             through = tr.tick < e if long else tr.tick > e
             if tr.tick == e and tr.buyer_maker == long:       # the aggressor hit our side at our price

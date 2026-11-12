@@ -4,7 +4,7 @@ from bounce import book, setup
 from bounce.book import SymbolBook
 from bounce.feed import pick
 from bounce.setup import Manage, Plan, cancel_reason, exit_reason, load_params, plan_bounce
-from tests.helpers import long_book, make_book, short_book
+from tests.helpers import PIN_P, long_book, make_book, short_book
 
 NOW = 1000.0
 
@@ -12,6 +12,7 @@ NOW = 1000.0
 @pytest.fixture(autouse=True)
 def fresh_params():
     saved, dens = dict(setup.P), dict(book.DENS)
+    setup.P.update(PIN_P)                             # the values the tests depend on, not the defaults
     yield
     setup.P.clear()
     setup.P.update(saved)
@@ -31,7 +32,9 @@ def test_long_entry_in_front_stop_behind_take_at_middle_of_the_move():
     assert f["approach"] == pytest.approx(0.0108, abs=1e-4) and f["move_s"] == pytest.approx(1500)
     assert f["rr"] == pytest.approx((1.0200 - 1.0002) / (1.0002 - 0.9985), abs=0.01)
     assert p.tp1 == pytest.approx(1.0019) and p.tp_run == 0.0      # half at +1R (risk 0.0017), no runner
-    assert f["atr"] is None and f["trend"] is None and f["accel"] is None   # no bars, no hours: rules off
+    assert f["atr"] == pytest.approx(0.0002 / 1.003, abs=1e-5) and f["trend"] is None   # tiny ATR, no hours
+    assert f["accel"] == pytest.approx(2.54, abs=0.02) and f["counter"] is False        # 3 min speed vs the move's
+    assert f["hold_s"] is None and f["mkt"] is None and p.skip == ""                    # no tape, no other coins
 
 
 def test_short_is_the_mirror():
@@ -172,8 +175,10 @@ def bars(b, now, rng, n=14, mid=1.0100):
         b.bars.append([m, mid + rng / 2, mid - rng / 2])
 
 
-def hours(b, closes):
-    b.h1.extend([[h, c] for h, c in enumerate(closes)])
+def hours(b, closes, last_hour=None):
+    """Hour closes ending at hour `last_hour` (default: hours 0 .. len - 1)."""
+    first = 0 if last_hour is None else last_hour - len(closes) + 1
+    b.h1.extend([[first + i, c] for i, c in enumerate(closes)])
 
 
 DOWN = [1.50 - 0.02 * i for i in range(25)]          # 1h closes falling: last < EMA20 -> trend -1
@@ -181,7 +186,7 @@ UP = [1.00 + 0.02 * i for i in range(25)]
 
 
 def test_book_atr_trend_and_price_ago():
-    b = long_book(NOW)
+    b = long_book(NOW, bars=False)
     assert b.atr(NOW) is None                        # no bars yet
     bars(b, NOW, 0.004)
     b.bars.append([int(NOW // 60), 1.2, 0.8])        # the current, unfinished minute does not count
@@ -207,66 +212,100 @@ def test_seed_h1_keeps_our_own_hours():
 
 
 def test_stop_is_two_atr_behind_the_density():
-    b = long_book(NOW)
-    bars(b, NOW, 0.006)                              # ATR 0.6 % > the 0.15 % floor
+    b = long_book(NOW, atr=0.006)                    # ATR 0.6 % > the 0.15 % floor
     p = plan_bounce(b, NOW, set())
     assert p is not None and p.stop == pytest.approx(1.0000 - 0.0120)
     assert p.tp1 == pytest.approx(1.0002 + (1.0002 - 0.9880))       # +1R from the entry
     assert p.features["atr"] == pytest.approx(0.006 / 1.003, abs=1e-5) and p.features["stop_atr"] == pytest.approx(2.03, abs=0.01)
-    b2 = long_book(NOW)
-    bars(b2, NOW, 0.0004)                            # a quiet coin: 2 x ATR < 0.15 %, the floor stays
+    b2 = long_book(NOW, atr=0.0004)                  # a quiet coin: 2 x ATR < 0.15 %, the floor stays
     assert plan_bounce(b2, NOW, set()).stop == pytest.approx(0.9985)
     big = [(1500, 1.0800), (180, 1.0140), (60, 1.0070), (0, 1.0030)]       # an 8 % move: take 1.0400
-    b3 = make_book(big, 1.0000, "bid", NOW)
-    bars(b3, NOW, 0.010)                             # 2 x ATR = 2 %: wide, but inside risk_max 4 %
+    b3 = make_book(big, 1.0000, "bid", NOW, atr=0.010)   # 2 x ATR = 2 %: wide, but inside risk_max 4 %
     assert plan_bounce(b3, NOW, set()).stop == pytest.approx(0.9800)
-    b4 = make_book(big, 1.0000, "bid", NOW)
-    bars(b4, NOW, 0.025)                             # 5 %: more than risk_max
+    b4 = make_book(big, 1.0000, "bid", NOW, atr=0.025)   # 5 %: more than risk_max
     setup.P["min_rr"] = 0.0
     assert plan_bounce(b4, NOW, set()) is None
     setup.P["stop_atr"] = 0.0
     assert plan_bounce(b4, NOW, set()).stop == pytest.approx(0.9985)
 
 
-def counter_book(now, start_30m):
-    """long_book with a mid sample 31 min ago at `start_30m` (the speed of the 30 min window)."""
-    return make_book([(1860, start_30m), (1500, 1.0400), (180, 1.0140), (60, 1.0070), (0, 1.0030)], 1.0000, "bid",
-                     now)
+T0 = 100_000.0                                       # the move starts at T0 - 1500 = 98 500: hour 26 closed before it
+H0 = 26                                              # the last hour that closed before the move began
+
+
+def counter_book(now, start):
+    """long_book whose move starts at `start` 25 min ago: 1.20 = a 16 % move (3 min speed < the move's speed),
+    1.05 = a 4.5 % move (the last 3 min are the fastest part)."""
+    return make_book([(1500, start), (180, 1.0140), (60, 1.0070), (0, 1.0030)], 1.0000, "bid", now)
 
 
 def test_against_the_1h_trend_only_after_a_sharp_approach():
-    # 30 min ago 1.20: the window fell 16 %, the last 3 min 1.08 % -> accel 10 x 1.08 / 16.4 = 0.66 < 1
-    b = counter_book(NOW, 1.20)
-    hours(b, DOWN)                                   # a long into a falling 1h trend: counter
-    assert plan_bounce(b, NOW, set()) is None
+    setup.P["counter_accel"] = 1.0
+    # 1.20 -> 1.003 in 25 min = 16.4 %: the last 3 min (1.08 %) run at 0.55 x the speed of the move
+    b = counter_book(T0, 1.20)
+    hours(b, DOWN, H0)                               # a long into a falling 1h trend: counter
+    p, ghost = setup.scan(b, T0, set())
+    assert p is None and ghost is not None and ghost.skip == "counter_slow"     # not dropped: a shadow plan
+    assert ghost.features["counter"] is True and ghost.features["accel"] == pytest.approx(0.55, abs=0.02)
+    assert plan_bounce(b, T0, set()) is None
     b.h1.clear()
-    hours(b, UP)                                     # the same entry with the trend: fine
-    p = plan_bounce(b, NOW, set())
-    assert p is not None and p.features["counter"] is False and p.features["accel"] == pytest.approx(0.66, abs=0.01)
-    # 30 min ago 1.05: the window fell 4.5 % -> accel 2.4: a sharp approach, counter allowed
-    b = counter_book(NOW, 1.05)
-    hours(b, DOWN)
-    p = plan_bounce(b, NOW, set())
+    hours(b, UP, H0)                                 # the same entry with the trend: fine
+    p = plan_bounce(b, T0, set())
+    assert p is not None and p.features["counter"] is False and p.features["accel"] == pytest.approx(0.55, abs=0.02)
+    # 1.05: the move is 4.5 %, accel 2.0: a sharp approach, counter allowed
+    b = counter_book(T0, 1.05)
+    hours(b, DOWN, H0)
+    p = plan_bounce(b, T0, set())
     assert p is not None and p.features["counter"] is True and p.features["trend"] == -1
-    assert p.features["accel"] == pytest.approx(2.42, abs=0.01)
+    assert p.features["accel"] == pytest.approx(2.02, abs=0.02) and p.skip == ""
     setup.P["counter_accel"] = 0.0                   # the filter off
-    b = counter_book(NOW, 1.20)
-    hours(b, DOWN)
-    assert plan_bounce(b, NOW, set()) is not None
+    b = counter_book(T0, 1.20)
+    hours(b, DOWN, H0)
+    assert plan_bounce(b, T0, set()) is not None
+    setup.P["counter_accel"] = 2.5                   # a stricter bar turns the 4.5 % move into a shadow plan too
+    b = counter_book(T0, 1.05)
+    hours(b, DOWN, H0)
+    assert setup.scan(b, T0, set())[1].skip == "counter_slow"
+
+
+def test_counter_is_judged_by_the_trend_before_the_move_began():
+    setup.P["counter_accel"] = 1.0
+    b = counter_book(T0, 1.20)
+    hours(b, DOWN, H0)                               # falling before the move: counter
+    b.h1.append([H0 + 1, 3.0])                       # an hour that closes after the move began (28 * 3600 > 98 500)
+    assert b.trend(20) == 1                          # measured now, the last close is far above the EMA
+    assert b.trend(20, before=T0 - 1500) == -1       # measured before the move: the hour does not count
+    assert setup.scan(b, T0, set())[1].skip == "counter_slow"
+    assert b.trend(20, before=(H0 + 1) * 3600) == -1  # the close of hour H0 + 1 is at (H0 + 2) * 3600: not yet
+    assert b.trend(20, before=(H0 + 2) * 3600) == 1
+    assert b.trend(30, before=T0) is None            # fewer closes than the EMA length
+
+
+def test_accel_is_none_without_history_or_when_the_move_is_not_toward_the_density():
+    b = counter_book(T0, 1.20)
+    assert setup.accel(b, T0, 1.0030, 1, 1.20, T0 - 1500) == pytest.approx(0.55, abs=0.02)
+    assert setup.accel(b, T0, 1.0030, 1, 1.0020, T0 - 1500) is None            # start below mid: no move toward it
+    assert setup.accel(b, T0, 1.0030, -1, 1.20, T0 - 1500) is None             # the other side: moving away
+    young = make_book([(60, 1.0070), (0, 1.0030)], 1.0000, "bid", T0)
+    assert setup.accel(young, T0, 1.0030, 1, 1.04, T0 - 1500) is None          # no mid from 3 min ago
+    # a move shorter than approach_secs is judged over its own length: a straight drop is 1
+    s = make_book([(120, 1.0300), (60, 1.0150), (0, 1.0000)], 0.99, "bid", T0)
+    assert setup.accel(s, T0, 1.0000, 1, 1.0300, T0 - 120) == pytest.approx(1.0, abs=0.01)
 
 
 def test_counter_entry_is_cancelled_when_the_approach_stalls():
     setup.P["cancel_after"] = 600.0
-    b = counter_book(NOW, 1.05)
-    hours(b, DOWN)
-    p = plan_bounce(b, NOW, set())
-    assert p is not None and p.features["counter"]
-    assert cancel_reason(b, p, NOW, NOW) == ""
-    b.mids.append((NOW + 100, 1.0031))
-    b.mids.append((NOW + 300, 1.0030))               # 3 min without progress toward the density
-    assert cancel_reason(b, p, NOW, NOW + 300) == "counter_stalled"
+    setup.P["counter_accel"] = 1.0
+    b = counter_book(T0, 1.05)
+    hours(b, DOWN, H0)
+    p = plan_bounce(b, T0, set())
+    assert p is not None and p.features["counter"] and p.features["move_start"] == 1.05
+    assert cancel_reason(b, p, T0, T0) == ""
+    b.mids.append((T0 + 100, 1.0031))
+    b.mids.append((T0 + 300, 1.0030))                # 3 min without progress toward the density
+    assert cancel_reason(b, p, T0, T0 + 300) == "counter_stalled"
     p.features["counter"] = False                    # with the trend the stall is no reason
-    assert cancel_reason(b, p, NOW, NOW + 300) == ""
+    assert cancel_reason(b, p, T0, T0 + 300) == ""
 
 
 def test_a_density_being_eaten_is_not_traded_and_cancels_the_entry():

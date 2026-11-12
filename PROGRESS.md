@@ -172,4 +172,29 @@ win 10.9 %; 604 "density_gone" exits = 0 % win -> the owner's rules drop that ex
 - [x] README (rules table, variables), review doc
 - [x] paper smoke on the public feed (2 + 5 min: 16 synced, h1 48 each, ATR / trend / ch24 / accel computed, no errors;
       0 plans in 5 min; JCT ATR 3.8-4.4 %, INIT 2.3-2.8 %: 2 x ATR > risk_max, those stay out while that wild)
-- [ ] Owner: replay / paper before live, commit, push, deploy (not done by Claude)
+- [x] Owner 2026-11-10: "commit and deploy in paper". No open bot position (last live trade 13:49 UTC, the UNI entry
+      expired); MODE=paper set with --skip-deploys; commit 9796061 pushed; deployment 990d9eea SUCCESS 14:32 UTC, log
+      "v0.4.0 started: mode paper, running, 9 trades so far (-0.0861 USDT); 0.3 USDT a stop", watching 16, no errors
+- [ ] paper: >= 50 trades, diary review (counter / accel / slip / depth_x in the features); then decide on live
+      (v0.4.0 paper 11-10 14:32 -> 11-12 06:45 UTC: 26 plans, 9 fills, 0 full takes, 1 tp1, -2.57 USDT, -0.96R a trade)
+
+## bounce v0.4.5 (2026-11-12, owner: "fix the errors of the critique, add a reality criterion for the density
+## (it must be able to hold price for a minute), roll out 0.4.5, run it on the last month, say if it works")
+Study scripts and data: Engine/Strategy_tester/research/bounce_v045 (fetch.py, study_*.py, out/*.json).
+- [x] data: 1m klines 2026-10-12 -> 11-12, 69 coins + BTC (49 with >= 5 liquid days + the lab's and the bot's coins)
+- [x] study A (klines, no wall): 3835 filled events, -0.10R [-0.13, -0.06], the same on both halves; trend, accel,
+      market move shift it by hundredths of R (out/study_a.txt)
+- [x] study B (real walls): 4618 lab plans, 997 fills re-traded with the v0.4.5 exits: density < 60 s of the flow
+      -0.17R (n 501), >= 60 s -0.14R (n 139); density + trade alive 15 s after the fill -0.00R (n 149), with
+      hold >= 60 and age >= 60 +0.03R (n 50, CI -0.32..+0.36); all gates 7 fills; age < 60 s: 91 % of the plans lost
+      the density before the fill; 89 % of the densities gone after a fill went within 15 s (out/study_b.txt)
+- [x] study C: the lab's own tick-level R by the same features (out/study_c.txt)
+- [x] setup.py / book.py: reality criterion (hold_min 60, hold_cancel 30), ATR missing = no trade, accel against the
+      move's own speed, trend before the move, min_age 60 s with a 3 % tracking band, market filter (mkt_max 1 %),
+      confirmed entry (confirm_secs 15), soft gates -> shadow plans (scan)
+- [x] trader.py / state.py / shadow.py: plan journal (<state>_plans.jsonl, GET .../plans: act, skip, shadow outcome),
+      a density that failed is closed for 30 min, ver + pid in every record, DAY_LOSS_R, live guard (GUARD_N / GUARD_R)
+- [x] sim.py: SIM_LAG 0.3 s on placing and cancelling an entry
+- [x] tests (sonnet-worker): 137 pytest pass (65 before); README; docs/bounce_v045_2026-11-12.md; VERSION 0.4.5
+- [ ] commit + push (paper), check the deployment log
+- [ ] verdict to the owner

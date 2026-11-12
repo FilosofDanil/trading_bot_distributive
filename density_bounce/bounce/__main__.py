@@ -34,8 +34,9 @@ def _runner() -> Runner:
     capital = float(os.environ.get("CAPITAL") or os.environ.get("PAPER_CAPITAL") or "100")
     notify = os.environ.get("NOTIFY_TRADES", "closes").strip().lower()
     if mode == "paper":
-        return Runner(Store(os.environ.get("STATE_FILE", "/data/bounce_state.json"), capital), "paper",
-                      notify_trades=notify)
+        store = Store(os.environ.get("STATE_FILE", "/data/bounce_state.json"), capital)
+        store.set("last_error", None)                    # an earlier run's error (another mode) is not this run's state
+        return Runner(store, "paper", notify_trades=notify)
 
     # live: its own state file (the paper record stays as it was)
     from .keys import from_control
@@ -44,6 +45,7 @@ def _runner() -> Runner:
     store = Store(os.environ.get("LIVE_STATE_FILE", "/data/bounce_live_state.json"), capital)
     if store.data["totals"]["n"] == 0 and not store.data["slots"] and store.data["capital0"] != capital:
         store.set("capital0", capital)                   # nothing traded yet: CAPITAL may still change
+    store.set("last_error", None)                        # the checks below set it again if live stays off
     why = from_control()
     if why:
         # not notify: the reason is the strategy's last_error, which control already alerts once
@@ -86,7 +88,9 @@ def serve() -> None:
                                f"{st['totals']['n']} trades so far ({st['totals']['pnl']:+.4f} USDT); "
                                f"{risk_usd():g} USDT a stop, <= {RISK['notional']:g} USDT/trade, approach >= "
                                f"{p['approach_min']:.2%}/{p['approach_secs']:.0f}s, move >= {p['move_min']:.2%}/"
-                               f"{p['move_secs'] / 60:.0f}min, stop max({p['stop_buf']:.2%}, {p['stop_atr']:g} x ATR), "
+                               f"{p['move_secs'] / 60:.0f}min, density >= {p['hold_min']:.0f} s of the flow, entry "
+                               f"{p['confirm_secs']:.0f} s after the touch, market < {p['mkt_max']:.1%}, "
+                               f"stop max({p['stop_buf']:.2%}, {p['stop_atr']:g} x ATR), "
                                f"{p['tp1_part']:.0%} at +{p['tp1_r']:g}R, take {p['take_frac']:.0%} of the move", True)
     runner.start()
     print(f"density-bounce: API on [::]:{port}, state {runner.store.path}", flush=True)

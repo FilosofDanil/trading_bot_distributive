@@ -144,6 +144,8 @@ def make_server(runner: Runner, token: str, port: int, host: str = "::",
                 if method == "GET" and action == "trades":
                     n = _int(q.get("n"), 50, 1, 1000)
                     return self._send(200, runner.store.snapshot()["trades"][-n:])
+                if method == "GET" and action == "plans":          # every plan: traded, cancelled, skipped (shadow)
+                    return self._send(200, runner.store.plans(_int(q.get("n"), 200, 1, 5000)))
                 if method == "GET" and action == "events":
                     return self._send(200, self._events(q))
                 return self._send(404, {"error": "not found"})

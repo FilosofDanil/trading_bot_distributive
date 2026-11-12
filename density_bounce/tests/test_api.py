@@ -78,8 +78,35 @@ def test_plan_report_positions_have_text(api):
     assert code == 200 and trades[0]["reason"] == "take"
 
 
+def test_plans_endpoint_returns_the_tail_of_the_plan_journal(api):
+    call, runner = api
+    assert call("GET", f"/v1/strategies/{STRATEGY_ID}/plans") == (200, [])        # no journal yet
+    for i in range(4):
+        runner.store.plan({"pid": f"XUSDT-{i}", "ver": "0.4.5", "act": "skip:weak", "skip": "weak",
+                           "shadow": {"hit": "nofill", "r": None}})
+    code, recs = call("GET", f"/v1/strategies/{STRATEGY_ID}/plans")
+    assert code == 200 and [r["pid"] for r in recs] == [f"XUSDT-{i}" for i in range(4)]
+    assert recs[0]["act"] == "skip:weak" and recs[0]["shadow"] == {"hit": "nofill", "r": None}
+    code, recs = call("GET", f"/v1/strategies/{STRATEGY_ID}/plans?n=2")
+    assert code == 200 and [r["pid"] for r in recs] == ["XUSDT-2", "XUSDT-3"]
+    assert call("GET", f"/v1/strategies/{STRATEGY_ID}/plans", token="wrong")[0] == 401
+    assert call("GET", "/v1/strategies/funding.carry/plans")[0] == 404
+
+
 def test_flatten_needs_confirm_and_unknown_strategy(api):
     call, _ = api
     assert call("POST", f"/v1/strategies/{STRATEGY_ID}/flatten", {})[0] == 400
     assert call("POST", f"/v1/strategies/{STRATEGY_ID}/flatten", {"confirm": True})[0] == 409   # loop not running
     assert call("GET", "/v1/strategies/funding.carry/plan")[0] == 404
+
+
+def test_a_paper_start_forgets_an_old_live_error(tmp_path, monkeypatch):
+    from bounce.__main__ import _runner
+    old = Store(tmp_path / "s.json", 300.0)
+    old.event("error", "bounce.density: live trading is OFF - futures available balance 365.17 < 500 USDT")
+    monkeypatch.setenv("MODE", "paper")
+    monkeypatch.setenv("STATE_FILE", str(tmp_path / "s.json"))
+    runner = _runner()
+    st = runner.strategy()
+    assert st["last_error"] is None and st["state"] == "running" and st["mode"] == "paper"
+    assert runner.store.data["errors"]                   # the history stays

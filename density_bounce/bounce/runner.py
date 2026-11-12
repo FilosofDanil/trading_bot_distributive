@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import threading
 import time
 from concurrent.futures import TimeoutError as FutureTimeout
@@ -24,8 +25,9 @@ class Runner:
                  notify_trades: str = "closes"):
         self.store = store
         self.mode = mode                               # paper | live | live-blocked
-        self.broker = broker or SimBroker()
+        self.broker = broker or SimBroker(lag=float(os.environ.get("SIM_LAG") or 0.3))
         self.trader = Trader(self.broker, store, notify_trades=notify_trades)
+        self.trader.live = mode == "live"
         if blocked:
             self.trader.halt = f"live trading is OFF: {blocked}"
         on_trade = self.broker.on_trade if isinstance(self.broker, SimBroker) else None
@@ -121,7 +123,7 @@ class Runner:
                 try:
                     tick = await self.feed.get("/fapi/v1/ticker/24hr")
                     from .feed import pick
-                    self.feed.set_symbols(pick(tick, self.trader.info, set(self.trader.slots),
+                    self.feed.set_symbols(pick(tick, self.trader.info, self.trader.keep(),
                                                self.trader.blocked_syms, self.feed.n))
                 except Exception as e:
                     log.warning("rescreen: %r", e)
@@ -146,8 +148,8 @@ class Runner:
         upnl = self.in_loop(self._upnl) if self.trader.slots else 0.0
         today = d["days"].get(utc_day(time.time()), {})
         with self.trader.lock:
-            held = [s.sym for s in self.trader.slots.values() if s.state != "entry"]
-            working = [s.sym for s in self.trader.slots.values() if s.state == "entry"]
+            held = [s.sym for s in self.trader.slots.values() if s.state not in ("arm", "entry")]
+            working = [s.sym for s in self.trader.slots.values() if s.state in ("arm", "entry")]
         state = d["desired"]
         if self.trader.halt:
             state = "error"
@@ -174,16 +176,21 @@ class Runner:
             lines.append(f"no new entries: {why}")
         p = setup.P
         lines.append(f"rules: approach >= {p['approach_min']:.2%}/{p['approach_secs']:.0f}s, "
-                     f"move >= {p['move_min']:.2%}/{p['move_secs'] / 60:.0f}min, against the 1h trend only with "
-                     f"accel >= {p['counter_accel']:g}, stop max({p['stop_buf']:.2%}, {p['stop_atr']:g} x ATR) behind, "
-                     f"{p['tp1_part']:.0%} at +{p['tp1_r']:g}R, take {p['take_frac']:.0%} of the move, "
+                     f"move >= {p['move_min']:.2%}/{p['move_secs'] / 60:.0f}min, density >= {p['hold_min']:.0f} s of "
+                     f"the flow and {p['min_age']:.0f} s old, market move < {p['mkt_max']:.1%}, entry "
+                     f"{p['confirm_secs']:.0f} s after the touch, stop max({p['stop_buf']:.2%}, {p['stop_atr']:g} x ATR) "
+                     f"behind, {p['tp1_part']:.0%} at +{p['tp1_r']:g}R, take {p['take_frac']:.0%} of the move, "
                      f"RR >= {p['min_rr']:g}")
         lines.append(f"risk: {risk_usd():g} USDT a stop, <= {RISK['notional']:g} USDT/trade x{RISK['leverage']}, "
-                     f"max {RISK['max_open']} at once, day stop -{RISK['day_loss']:g}, "
-                     f"total stop -{RISK['total_loss']:g} USDT")
+                     f"max {RISK['max_open']} at once, day stop -{RISK['day_loss']:g} USDT or "
+                     f"-{RISK['day_loss_r']:g}R, total stop -{RISK['total_loss']:g} USDT")
+        st = self.store.data["stats"]
+        lines.append(f"plans {st.get('plans', 0)} · armed {st.get('armed', 0)} · placed {st.get('placed', 0)} · "
+                     f"filled {st.get('filled', 0)} · cancelled {st.get('cancelled', 0)} · shadow plans followed "
+                     f"{len(self.trader.shadows)}")
         for v in self.trader.view():
             lines.append(f"{v['state'].upper()} {v['side']} {v['symbol']} entry {v['entry']:g} stop {v['stop']:g} "
-                         f"take {v['tp']:g}" + (f" upnl {v['upnl']:+.4f}" if v["state"] != "entry" else ""))
+                         f"take {v['tp']:g}" + (f" upnl {v['upnl']:+.4f}" if v["state"] not in ("arm", "entry") else ""))
         near = []
         for sym, b in self.trader.books.items():
             mid = b.mid()
@@ -212,7 +219,7 @@ class Runner:
     def positions(self) -> list[dict]:
         out = []
         for v in self.in_loop(self.trader.view):
-            if v["state"] == "entry":
+            if v["state"] in ("arm", "entry"):
                 continue
             out.append({"symbol": v["symbol"], "n": v["n"], "days": 0, "pnl": v["upnl"],
                         "side": v["side"], "entry": v["entry"], "stop": v["stop"], "tp": v["tp"], "mark": v["mark"],

@@ -87,7 +87,7 @@ class Feed:
                 info = parse_info(await self.get("/fapi/v1/exchangeInfo"))
                 self.trader.info.update(info)
                 tick = await self.get("/fapi/v1/ticker/24hr")
-                want = pick(tick, info, set(self.trader.slots), exclude_fn(), self.n)
+                want = pick(tick, info, self.trader.keep(), exclude_fn(), self.n)
                 if want != self.watching:
                     log.info("watching %d: %s", len(want), " ".join(want))
                 self.set_symbols(want)
@@ -101,8 +101,9 @@ class Feed:
             await asyncio.sleep(SCREEN["every"])
 
     def set_symbols(self, want: list[str]) -> None:
+        keep = self.trader.keep()
         for s in list(self.tasks):
-            if s not in want and s not in self.trader.slots:
+            if s not in want and s not in keep:
                 self.tasks.pop(s).cancel()
                 self.trader.books.pop(s, None)
         for s in want:

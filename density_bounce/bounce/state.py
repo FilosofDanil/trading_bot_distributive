@@ -94,6 +94,39 @@ class Store:
             d["consec_losses"] = d["consec_losses"] + 1 if tr["pnl"] < 0 else 0
             self.save()
 
+    @property
+    def plans_path(self) -> Path:
+        return self.path.with_name(self.path.stem + "_plans.jsonl")
+
+    def plan(self, rec: dict) -> None:
+        """Append one plan record (traded, cancelled or skipped, with what the plain entry would have done) to the
+        plan journal next to the state file: one JSON object a line, never rewritten; at 20 MB the file becomes
+        *.old and a new one starts."""
+        with self.lock:
+            try:
+                p = self.plans_path
+                if p.exists() and p.stat().st_size > 20e6:
+                    os.replace(p, p.with_suffix(".old"))
+                with p.open("a", encoding="utf-8") as f:
+                    f.write(json.dumps(rec, separators=(",", ":"), default=float) + "\n")
+            except OSError as e:
+                print(f"[warn] plan journal: {e}", flush=True)
+
+    def plans(self, n: int = 200) -> list[dict]:
+        """The last n plan records."""
+        with self.lock:
+            try:
+                lines = self.plans_path.read_text(encoding="utf-8").splitlines()[-n:]
+            except OSError:
+                return []
+        out = []
+        for line in lines:
+            try:
+                out.append(json.loads(line))
+            except ValueError:
+                continue
+        return out
+
     def set(self, key: str, value) -> None:
         with self.lock:
             self.data[key] = value
