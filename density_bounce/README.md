@@ -67,7 +67,8 @@ Paper fills ignore the queue. Expect long losing streaks (9 here, 18 under nearb
 
 ### v0.4.5 (2026-11-12): what a month of history says
 
-v0.3.0 and v0.4.0 closed 30 trades without one full take. The critique and the numbers are in
+v0.3.0 closed 21 live trades without a take; v0.4.0 closed 16 paper trades (11-10 → 11-12) at −0.50R a trade
+with 2 full takes, −2.37 USDT. The critique and the numbers are in
 [`docs/bounce_v045_2026-11-12.md`](../docs/bounce_v045_2026-11-12.md); the scripts in
 `Engine/Strategy_tester/research/bounce_v045`. Binance keeps no order-book history, so the month was run in three
 parts (R = result / risk, net of full fees; CI = 95 %, bootstrap by coin-day):
