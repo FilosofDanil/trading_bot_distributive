@@ -200,7 +200,8 @@ Study scripts and data: Engine/Strategy_tester/research/bounce_v045 (fetch.py, s
       with loosened PARAMS (4 armed, 5 cancels with reasons, 15 plan records: skip:weak / young / counter_slow,
       cancel:entry_timeout / counter_stalled; no errors; no entry reached the confirmation, that path has unit tests)
 - [x] commit b274b57 pushed; deployment badeffa3 SUCCESS 2026-11-12 19:25 UTC, log "v0.4.5 started: mode paper,
-      running, 25 trades so far (-2.4565 USDT)", watching 16, no errors
+      running, 25 trades so far (-2.4565 USDT)", watching 16, no errors; the docs commit d1b03de redeployed it:
+      39390f32 SUCCESS 19:28 UTC, the same start line
 - [x] v0.4.0 paper final (11-10 14:32 -> 11-12 19:25 UTC): 36 plans, 16 trades, 2 full takes, -0.50R a trade,
       -2.37 USDT; by the logged features v0.4.5 would have skipped both takes (a 20 s old wall, a wall of 0.18 of
       the minute turnover) and three of that day's stops
