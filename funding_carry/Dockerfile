@@ -1,14 +1,16 @@
 # funding-carry runner. Build context: funding_carry/ (Railway Root Directory).
-FROM python:3.12-slim
-ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 PIP_NO_CACHE_DIR=1 PIP_DISABLE_PIP_VERSION_CHECK=1
-WORKDIR /app
-COPY requirements.txt .
-RUN pip install -r requirements.txt
-COPY carry ./carry
-COPY tests ./tests
-# the image is built only if the tests pass; pytest is removed afterwards
-RUN pip install pytest==9.1.1 && python -m pytest -q -p no:cacheprovider tests && \
-    pip uninstall -y pytest && rm -rf tests
-ENV STATE_FILE=/data/carry_state.json PORT=8080 MODE=paper
+FROM golang:1.24-alpine AS build
+WORKDIR /src
+COPY go.mod ./
+COPY . .
+# the image is built only if the tests pass
+RUN CGO_ENABLED=0 go test ./... && \
+    CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/funding-carry .
+
+# distroless/static ships CA certificates. Runs as root so it can write to the Railway volume mounted at /data.
+FROM gcr.io/distroless/static-debian12
+COPY --from=build /out/funding-carry /funding-carry
+ENV STATE_FILE=/data/carry_state.json PORT=8080 MODE=paper GOMEMLIMIT=48MiB
 EXPOSE 8080
-CMD ["python", "-m", "carry", "serve"]
+ENTRYPOINT ["/funding-carry"]
+CMD ["serve"]

@@ -16,7 +16,7 @@ port of `Engine/Strategy_tester/lab/carry_live.py`, the "safe carry" the lab rec
   (gainers / losers / decorrelated / volume_in) and the liquid top-40, provided they have a USDT spot pair
   that has traded for at least 7 days.
 
-`carry/strategy.py` keeps `decide()` and `orders()` line for line with the lab. Both implementations were run
+`internal/strategy` keeps `decide()` and `orders()` line for line with the lab. Both implementations were run
 on 1000 random markets and agreed on every one, covering opens, the keep band, pair stops, re-hedges, resizes
 and cooldowns.
 
@@ -28,8 +28,8 @@ fees (spot taker 0.10 % + perp taker 0.05 % + 2 × 0.02 % slippage per pair entr
 
 ## Live mode (`MODE=live`, owner decision 2026-10-11)
 
-The same decision, carried out with real market orders on the owner's main account (`carry/live.py`,
-`carry/exchange.py`): at most `MAX_COINS` (3) pairs, capital `CARRY_CAPITAL` (500 USDT), its own state file
+The same decision, carried out with real market orders on the owner's main account (`internal/live`,
+`internal/exchange`): at most `MAX_COINS` (3) pairs, capital `CARRY_CAPITAL` (500 USDT), its own state file
 `/data/carry_live_state.json` (the paper record is kept). Every order is tagged `fc-…`, every exchange stop
 `fcs-…`; the bot never cancels or closes anything else. It does not open a pair on a symbol where the account
 already has a futures position.
@@ -78,20 +78,26 @@ and every `/v1/*` request needs `X-Control-Token`. `GET /healthz` is open.
 
 ## Run locally
 
+The runner is Go (module `fundingcarry`, stdlib only). The Python version (`carry/`, `tests/`) was removed on 2026-11-14
+after the port was proven equal; it is in git history.
+
 ```
 cd funding_carry
-pip install -r requirements.txt pytest
-python -m pytest -q tests
+go test ./...
 set STATE_FILE=data\carry_state.json
-python -m carry once            # one cycle now (uses the public Binance API)
-python -m carry once --preview  # the plan only, the state is not changed
-set CONTROL_TOKEN=dev & python -m carry serve
+go run . once --day 2026-11-13 --preview   # the plan only, the state is not changed (public Binance API)
+go run . once                              # one cycle now
+set CONTROL_TOKEN=dev & go run . serve     # API on :8080 (PORT) + the daily cycle
 ```
+
+`testdata/` holds fixtures made by running the Python code (`decide`, `funding8h`, `screens`, `paper`, `state_py.json`);
+the Go tests check the port against them.
 
 ## Railway
 
 The service is `funding-carry`, with Root Directory `/funding_carry`, the Dockerfile builder, 1 replica and
-a volume at `/data`. The image runs the tests at build time.
+a volume at `/data`. The image is built in two stages (`golang` runs the tests and builds, `distroless/static` runs
+the binary) and sets `GOMEMLIMIT=48MiB`.
 
 | Variable | Notes |
 |---|---|
@@ -104,5 +110,5 @@ a volume at `/data`. The image runs the tests at build time.
 | `MAX_COINS` | live only, default 3 |
 | `LIQ_TOPUP_DIST`, `LIQ_CLOSE_DIST`, `LIQ_CLOSE_RISE`, `LIQ_STOP_RISE` | live protection levels, defaults 0.60 / 0.25 / 0.90 / 1.20 |
 
-The region must not be in the US, because Binance answers 451 there. The runner raises `RestrictedLocation`,
+The region must not be in the US, because Binance answers 451 there. The runner reports `RestrictedLocation`,
 and control shows it as the strategy error.

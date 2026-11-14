@@ -105,6 +105,13 @@ To add it to the running project: create the `density-bounce` service (root `/de
 `CONTROL_TOKEN`), then extend control's `RUNNERS` with `bounce=http://density-bounce.railway.internal:8080`.
 Control renders its `/plan`, `/positions`, `/report` from the runner's `text` lines (carry is unchanged).
 
+## Round 5 — both runners in Go
+
+Go is the standard for this repo ([`CLAUDE.md`](CLAUDE.md)). `funding_carry` and `density_bounce` were rewritten from
+Python to Go on 2026-11-14 with the same strategy, HTTP contract and state files; equality with the Python code is
+proven by fixtures recorded from it. Peak memory: carry 237 → 29 MB, bounce 145 → 47 MB (10 min). Details and the
+type narrowing: [`docs/go_port.md`](docs/go_port.md). The Python sources are in git history.
+
 ## What the system does
 
 1. **Monitors the account**: balance, equity, daily PnL, drawdown from peak. Sends alerts to Telegram.
@@ -129,7 +136,7 @@ control ──ping/min──► healthchecks.io (external watchdog)
 | Service | Language | Role | Ported from |
 |---|---|---|---|
 | `control` | Go | Telegram UI, risk guard (every 10 s), runner polling, reports, `/backup` | `Engine/lossguard` |
-| `runner` | Python | strategy plugins, orders, control API on `[::]:8080` | `Engine/Trading_Bot/swingbot` |
+| `runner` | Go | strategy plugins, orders, control API on `[::]:8080` | `Engine/Trading_Bot/swingbot` |
 | `backup` | shell / Go | cron `0 3 * * *` UTC: `pg_dump -Fc` → R2/B2 + Telegram | new |
 | Postgres | — | single database (Railway template, 1 GB volume) | replaces `state.json` and `bot.db` |
 
@@ -151,14 +158,14 @@ control/                 Go module (Root Directory of the control service)
   migrations/            numbered SQL files, applied when control starts
   Dockerfile             with postgresql-client for /backup
   railway.json
-runner/                  Python package (Root Directory of the runner service)
-  strategies/            one plugin per strategy: bounce, breakout, …
-  api.py                 control API
+runner/                  Go module (Root Directory of the runner service)
+  internal/strategies/   one plugin per strategy: bounce, breakout, …
+  internal/api/          control API
   Dockerfile | railway.json
 backup/                  cron job (Root Directory of the backup service)
   Dockerfile | railway.json
 docs/                    architecture.html, notes
-.github/workflows/ci.yml go test + pytest; Railway waits for CI before deploying
+.github/workflows/ci.yml gofmt + go vet + go test per module; Railway waits for CI before deploying
 ```
 
 > When a service has a Root Directory set, Railway builds **only that folder**. So code is not shared
@@ -227,7 +234,7 @@ Required on Railway:
 - **Replicas = 1** and a leader-lock (`pg_try_advisory_lock`) in runner and control: during a deploy, two copies must not trade
   or poll Telegram at the same time. Set `RAILWAY_DEPLOYMENT_OVERLAP_SECONDS=0`.
 - SIGTERM handling; `RAILWAY_DEPLOYMENT_DRAINING_SECONDS≈30`.
-- The Python server listens on `::`, because Railway's private network runs over IPv6.
+- Every runner listens on `[::]:PORT` (dual stack), because Railway's private network runs over IPv6.
 - Restart policy: On Failure. Railway checks the healthcheck only at deploy time; liveness is tracked by control and the external watchdog.
 - **Do not enable** the hard usage limit (it will stop the services) or App Sleeping.
 - Hobby has no static IP, so a **separate Binance key for Railway** is needed: Futures trade, no withdraw or transfer.

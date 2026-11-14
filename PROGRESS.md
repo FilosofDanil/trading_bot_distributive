@@ -209,3 +209,35 @@ Study scripts and data: Engine/Strategy_tester/research/bounce_v045 (fetch.py, s
 - [ ] paper v0.4.5: >= 200 plan records, then judge the gates by `skip` / `act` / `shadow.r` (GET .../plans);
       stop rule: mean R < -0.3 after 30 trades, or the gated plans' shadow result no better than the skipped ones'
 - [ ] not done: the live broker still polls REST (0.4 s) instead of the user-data stream
+
+# Round 5 — Go port of funding_carry and density_bounce (goal 2026-11-14)
+
+Owner: Go is the repo standard (Python only when Go is physically impossible); cut Railway RAM (PRICING.md:
+74 % of the bill is RAM). In the Go bounce: no 50k-trade tape, per-second buckets for flow / turnover, per-density
+counters instead of the unbounded `cum_at`, compact types (int32 ticks, float32 where 7 digits are enough).
+Hard rule: the Go runners read the state files the Python runners left on /data (live carry may hold positions).
+
+- [x] CLAUDE.md: Go standard
+- [x] read funding_carry + density_bounce Python; design notes docs/go_port.md (packages, types, state compat)
+- [x] funding_carry Go (market / universe / strategy without pandas, paper, exchange, live, state, runner, api, keys, main) + tests (sonnet-worker)
+      fixtures from the Python code equal within 1e-9 (funding_8h 90 series, decide 320 markets + 18 fetched,
+      screens tags, paper 3 scenarios, Python state round trip); e2e `once --day 2026-11-13 --preview` identical
+      (111 candidates, same top 5 to all digits); peak working set 237 MB → 29 MB; image 15.9 MB;
+      live.go / exchange.go reviewed line by line against live.py (main session): no differences
+- [x] density_bounce internal/book (main session): compact types, 310 s tape, 1 s turnover buckets, per-density
+      counters instead of cum_at; == Python book.py on a 20 min synthetic stream (18 096 calls, 80 checkpoints,
+      resync incl.); memory test: 400k prints at new prices, heap flat
+- [x] density_bounce setup / shadow / sim / trader / state (+ trades journal to JSONL, plan journal tail reads) + tests,
+      Python cross-checks: scan on 300 books (every feature equal), paper replay 2 h / 6 symbols / 34k events
+      (trades, plan journal, stats, event texts equal) (sonnet-worker)
+- [x] density_bounce feed / live / runner / api / keys / main / Dockerfile (sonnet-worker); live broker tested on a
+      fake Binance only
+- [x] main session review: lock hand-off around REST calls = asyncio await points (Tick iterates key copies);
+      ShadowSeen / Failed pruned every 600 s (Python leaked them), test added, replay still equal
+- [x] state compatibility tests on JSON written by the Python code (carry state round trip; bounce state + trades
+      migration to JSONL without duplicates)
+- [x] Dockerfiles (Go, distroless; images 15.9 / 16.3 MB), CI go jobs, control e2e against both Go runners: PASS
+- [x] gofmt / vet / test; docker build; local paper smoke on the public feed: bounce 10 min Go vs Python side by side,
+      16/16 books synced, same symbols, 173 densities each; peak working set 46.5 MB vs 145.5 MB
+- [x] remove the Python sources (in git history); README / docs/go_port.md / ../PRICING.md
+- [ ] commit / push / deploy — only on the owner's word
