@@ -246,4 +246,8 @@ Hard rule: the Go runners read the state files the Python runners left on /data 
       funding-carry a085b9b → deployment 1c9ac4a6 SUCCESS: v0.2.0 live, carry_live_state.json, equity 300.00, 0 pairs,
       keys from control, liquidation guard on; Railway: memory 6–8 MB (was 271 MB avg).
       Not committed: control/internal/runners/e2e_test.go comment (a push would redeploy control)
-- [ ] owner checks both bots in Telegram (/bots, /debug, /bot bounce, /bot funding)
+- [x] owner checked /bots in Telegram: both running, carry live 0 positions 300.00, bounce paper 97.54 (-2.46)
+- [x] owner: bounce.density to live (2026-11-14 22:35 UTC, MODE=live → deployment 50796e5d SUCCESS): key from control
+      passed the account check (not live-blocked), live state /data/bounce_live_state.json (74 trades so far, -24.7359
+      USDT from earlier live versions), no leftovers to reconcile, no foreign symbols beyond BTC / ETH; the guard counts
+      only v0.5.0 trades. First real-money run of the Go live broker: watch the first entry / stop / close
