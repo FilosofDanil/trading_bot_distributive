@@ -240,4 +240,10 @@ Hard rule: the Go runners read the state files the Python runners left on /data 
 - [x] gofmt / vet / test; docker build; local paper smoke on the public feed: bounce 10 min Go vs Python side by side,
       16/16 books synced, same symbols, 173 densities each; peak working set 46.5 MB vs 145.5 MB
 - [x] remove the Python sources (in git history); README / docs/go_port.md / ../PRICING.md
-- [ ] commit / push / deploy — only on the owner's word
+- [x] deploy on the owner's word, one service at a time (2026-11-14):
+      density-bounce 8193ae6 → deployment 49508331 SUCCESS: v0.5.0 paper, state loaded (25 trades, -2.4565 USDT),
+      16 symbols; Railway: memory 33–39 MB (was 431 MB avg), CPU 0.036 vCPU (was 0.116), no warn / error lines.
+      funding-carry a085b9b → deployment 1c9ac4a6 SUCCESS: v0.2.0 live, carry_live_state.json, equity 300.00, 0 pairs,
+      keys from control, liquidation guard on; Railway: memory 6–8 MB (was 271 MB avg).
+      Not committed: control/internal/runners/e2e_test.go comment (a push would redeploy control)
+- [ ] owner checks both bots in Telegram (/bots, /debug, /bot bounce, /bot funding)
