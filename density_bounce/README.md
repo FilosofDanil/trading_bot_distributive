@@ -7,9 +7,9 @@ so `control` manages it from Telegram like `funding_carry`. **Paper mode by defa
 
 ## The rules (the owner's, 2026-11-03)
 
-| | rule (parameters in `bounce/setup.py` `P`) |
+| | rule (parameters in `internal/setup/params.go` `P`) |
 |---|---|
-| density | resting order ≥ 8× the median level, ≥ 25k USDT (50k in v0.2.0), ≥ ½ minute of turnover (`bounce/book.py` `DENS`, the lab's detector); tracked from 3 % away and **≥ 60 s old** (`min_age`; 1.5 % and 20 s until v0.4.5), still ≥ 70 % of its peak, touched ≤ 2 times |
+| density | resting order ≥ 8× the median level, ≥ 25k USDT (50k in v0.2.0), ≥ ½ minute of turnover (`internal/book/book.go` `DENS`, the lab's detector); tracked from 3 % away and **≥ 60 s old** (`min_age`; 1.5 % and 20 s until v0.4.5), still ≥ 70 % of its peak, touched ≤ 2 times |
 | **reality criterion** (v0.4.5) | the density must be worth **≥ 60 s of the aggressive flow that is hitting it now** (`hold_min`): its size / the one-sided tape toward it, the faster of the last 1 and 3 min. So it can hold price for a minute. Until v0.4.5 the size was compared with the average turnover only when the density was first seen (ZEC: a 50k wall against 2.6M a minute) |
 | sharp approach | mid moved ≥ 0.80 % toward the density in the last 3 min, is still moving (≥ 0.15 % in the last 60 s, covering ≥ half of the distance it had 60 s ago); now within 0.35 % of it |
 | previous move | from the extreme of the last 30 min (the high before a drop onto a bid wall, the low before a rally into an ask wall; 1m bars, the last hour is seeded when a symbol is added) to the density, ≥ 2.50 % |
@@ -145,7 +145,7 @@ since v0.4.5, `ver` and the plan id `pid`); `GET …/plans?n=200` — the plan j
 | `PARAMS` | — | JSON over `setup.P` and `book.DENS` |
 | `BINANCE_API_KEY` + `BINANCE_API_SECRET` or `BINANCE_PRIVATE_KEY` | — | live only (sealed); Ed25519 PEM, `\n` may be literal |
 
-Live mode starts only when `python -m bounce check` passes: futures trading enabled on the key, withdrawals off,
+Live mode starts only when `/bounce check` (`go run . check`) passes: futures trading enabled on the key, withdrawals off,
 one-way position mode, available balance ≥ 2 × notional. Otherwise the runner reports `live-blocked` and opens
 nothing. A Binance HMAC key without an IP whitelist is read-only and Railway Hobby has no static IP, so live needs
 a self-generated **Ed25519** key (or a static IP).
@@ -154,15 +154,20 @@ a self-generated **Ed25519** key (or a static IP).
 
 ```
 cd density_bounce
-pip install -r requirements.txt pytest
-python -m pytest -q tests
-CONTROL_TOKEN=x PORT=18080 STATE_FILE=./data/state.json python -m bounce serve
+go vet ./... && go test ./...
+go build -o bounce.exe .
+CONTROL_TOKEN=x PORT=18080 STATE_FILE=./data/state.json ./bounce.exe serve
 curl -H "X-Control-Token: x" localhost:18080/v1/strategies/bounce.density/plan
 ```
 
 ## Add to the Railway project (one time)
 
-The same steps as funding-carry (README, round 2); in Git Bash set `MSYS_NO_PATHCONV=1` first.
+The same steps as funding-carry (README, round 2); in Git Bash set `MSYS_NO_PATHCONV=1` first. The service is Go:
+the Dockerfile (`golang:1.24-alpine` runs `go test ./...` and builds, `distroless/static` runs `/bounce`, `serve` is the
+default, `GOMEMLIMIT=64MiB`) replaces the Python image; the variables and the state file are unchanged. On its first
+start the Go runner moves the closed trades out of the state file into `<state>_trades.jsonl` next to it (once, no
+duplicates). The Python version (`bounce/`, `tests/`) was removed on 2026-11-14 after the port was proven equal; it is in
+git history. What changed inside and why: [`docs/go_port.md`](../docs/go_port.md).
 
 ```
 railway add --service density-bounce
@@ -181,4 +186,5 @@ railway service redeploy --service control --yes
 ```
 
 Check: `railway logs --service density-bounce` shows `API on [::]:8080` and `watching 16: …`; in Telegram `/bots`
-lists `bounce.density`. Budget: ~60–90 MB RAM and a few % of a vCPU (16 symbols × 2 websockets).
+lists `bounce.density`. Budget: ~45–65 MB RAM (10 min paper on 16 symbols, 2026-11-14: Go 46.5 MB peak working set
+against 145.5 MB for the Python version, which kept growing) and a few % of a vCPU (16 symbols × 2 websockets).

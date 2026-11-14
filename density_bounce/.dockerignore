@@ -1,0 +1,5 @@
+bounce/
+tests/
+**/__pycache__
+requirements.txt
+data/
